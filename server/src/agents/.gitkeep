@@ -1,0 +1,6 @@
+# Agentic Modules Placeholder
+# agents/orchestrator.agent.js
+# agents/retrieval.agent.js
+# agents/question-generator.agent.js
+# agents/similarity.agent.js
+# agents/validation.agent.js

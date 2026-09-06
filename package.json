@@ -1,0 +1,21 @@
+{
+  "name": "paper-setting-ai-agent",
+  "version": "1.0.0",
+  "description": "AI-Powered Agentic RAG Question Generator Prototype",
+  "private": true,
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace=server\" \"npm run dev --workspace=client\"",
+    "dev:server": "npm run dev --workspace=server",
+    "dev:client": "npm run dev --workspace=client",
+    "test": "npm test --workspace=server && npm test --workspace=client",
+    "lint": "npm run lint --workspace=server && npm run lint --workspace=client",
+    "install:all": "npm install && npm install --workspace=server && npm install --workspace=client"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
