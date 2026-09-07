@@ -1,6 +1,7 @@
 import { QdrantClient } from '@qdrant/js-client-rest';
 import { randomUUID, createHash } from 'crypto';
 import { env } from '../config/env.js';
+import { detectChunkHeading } from '../document/notes-chunker.js';
 
 /**
  * Qdrant Vector Store Module (RAG Layer)
@@ -339,6 +340,11 @@ export const qdrantStore = {
           unit,
           sourceHash,
           chunkIndex: c.chunkIndex,
+          // TOPIC ANCHORING (Mode B): the detected heading of this chunk, so
+          // GET /kb/topics can group a unit's chunks into teacher-facing
+          // topics without re-running detection at read time. Null when the
+          // chunk has no heading (continuous prose, scanned notes).
+          chapter: detectChunkHeading(c.text),
           text: c.text,
         },
       });
@@ -410,6 +416,56 @@ export const qdrantStore = {
       return [...counts.entries()].map(([id, chunkCount]) => ({ id, label: id, chunkCount }));
     } catch (err) {
       console.error(`[Qdrant] listUnitsWithNotes failed: ${err.message}`);
+      return [];
+    }
+  },
+
+  /**
+   * TOPICS for one unit (Mode B topic anchoring): distinct chapter headings
+   * across the unit's syllabus chunks, with chunk counts — the same grouping
+   * strategy as listUnitsWithNotes, one level deeper.
+   *
+   * BOTH sources (approved decision): the stored `chapter` payload field
+   * (written at ingest since the payload change) AND detect-on-read fallback
+   * for points uploaded before that change. Chunks with no heading anywhere
+   * contribute nothing — the client's free-text combobox covers them.
+   *
+   * @param {Object} ctx - { class, subject, unit }
+   * @returns {Promise<Array<{ topic: string, chunkCount: number }>>}
+   */
+  async listTopicsWithNotes({ class: cls, subject, unit } = {}) {
+    if (unit == null || String(unit).trim() === '') return [];
+    try {
+      const client = getClient();
+      const name = getCollectionName();
+      await ensurePayloadIndex(client, name, 'unit');
+      const must = [
+        { key: 'corpus', match: { value: 'syllabus' } },
+        { key: 'unit', match: { value: String(unit) } },
+      ];
+      if (cls != null && String(cls).trim() !== '') must.push({ key: 'class', match: { value: String(cls) } });
+      if (subject != null && String(subject).trim() !== '') must.push({ key: 'subject', match: { value: String(subject) } });
+
+      const counts = new Map();
+      let offset;
+      do {
+        const page = await client.scroll(name, { limit: 256, offset, with_payload: true, with_vector: false, filter: { must } });
+        for (const p of page?.points ?? []) {
+          // Stored field first; detect-on-read for pre-change points.
+          const topic = p.payload?.chapter ?? detectChunkHeading(p.payload?.text);
+          if (!topic) continue;
+          const key = String(topic).trim();
+          if (!key) continue;
+          counts.set(key, (counts.get(key) ?? 0) + 1);
+        }
+        offset = page?.next_page_offset ?? undefined;
+      } while (offset);
+
+      return [...counts.entries()]
+        .map(([topic, chunkCount]) => ({ topic, chunkCount }))
+        .sort((a, b) => b.chunkCount - a.chunkCount || a.topic.localeCompare(b.topic));
+    } catch (err) {
+      console.error(`[Qdrant] listTopicsWithNotes failed: ${err.message}`);
       return [];
     }
   },

@@ -158,6 +158,12 @@ function slotPatternSummary(slot) {
   if (Number.isFinite(Number(pat.maxOptionCount)) && Number(pat.maxOptionCount) >= 2) {
     bits.push(`perItemOptions=${Math.round(Number(pat.maxOptionCount))}`);
   }
+  // PER-SLOT DIFFICULTY (Mode B): the slot may override the paper-level value.
+  // Extracted (Mode A) slots never carry one — the paper-level difficulty
+  // in REQUIREMENTS then applies, so the reference path is unaffected.
+  if (['Easy', 'Medium', 'Difficult'].includes(slot?.difficulty)) {
+    bits.push(`difficulty=${slot.difficulty}`);
+  }
   return bits.length > 0 ? `, ${bits.join(', ')}` : '';
 }
 
@@ -308,6 +314,12 @@ export function normalizeGeneratedQuestion(raw, index, opts = {}) {
     question.slotIndex = blueprintSlot.slotIndex;
     question.markExpression = blueprintSlot.markExpression || null;
     question.section = blueprintSlot.sectionName || null;
+    // PER-SLOT DIFFICULTY is authoritative when the slot carries one (Mode B);
+    // the model's own difficulty guess never overrides it. Absent → the
+    // paper-level difficulty the model was told to write stays.
+    if (['Easy', 'Medium', 'Difficult'].includes(blueprintSlot.difficulty)) {
+      question.difficulty = blueprintSlot.difficulty;
+    }
   }
 
   // Optional structured content used only by the document renderer

@@ -27,6 +27,7 @@ import {
   cleanOptionText,
   applyMarksCase,
 } from './paperTemplate.js';
+import { slotKey } from '../components/blueprintUnits.js';
 
 /** Preferred order only used as a last-resort tiebreak (never to create sections). */
 const TYPE_ORDER = ['MCQ', 'SHORT_ANSWER', 'LONG_ANSWER', 'TRUE_FALSE', 'FILL_IN_THE_BLANK'];
@@ -111,7 +112,10 @@ export function buildPaperModel({ questions = [], blueprint = null, settings = {
   const given = Array.isArray(questions) ? questions : [];
 
   // ── Content model for a single question entry ─────────────────────────────
-  const buildEntry = (raw, number, numberText, key) => {
+  // `slotLabel` is the blueprint slot's own label (blueprint mode only); it is
+  // what the review screen's stale lookup keys on, so it must travel onto the
+  // rendered question. Free-form entries pass null and fall back to number.
+  const buildEntry = (raw, number, numberText, key, slotLabel = null) => {
     const type = normType(raw.type);
     let text = String(raw.text || '').trim();
     let options = Array.isArray(raw.options) && raw.options.length > 0
@@ -175,6 +179,7 @@ export function buildPaperModel({ questions = [], blueprint = null, settings = {
 
     return {
       key: key || raw.questionId || `${type}-${number}`,
+      label: slotLabel ?? null,
       type,
       text,
       passage: raw.passage ? String(raw.passage) : '',
@@ -242,7 +247,7 @@ export function buildPaperModel({ questions = [], blueprint = null, settings = {
         else if (Number.isFinite(bpq.totalMarks)) marksAnnotated.markExpression = String(bpq.totalMarks);
         else if (Number.isFinite(bpq.marks?.total)) marksAnnotated.markExpression = String(bpq.marks.total);
       }
-      const entry = buildEntry(marksAnnotated, number, numberText, `slot-${slotIdx}`);
+      const entry = buildEntry(marksAnnotated, number, numberText, `slot-${slotIdx}`, slotKey(bpq, slotIdx));
       assigned.add(slotIdx);
       return entry;
     };

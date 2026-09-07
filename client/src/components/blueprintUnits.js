@@ -29,6 +29,16 @@ export function slotKey(q, index) {
   return `Q${index + 1}`;
 }
 
+/**
+ * Is this rendered question's slot in the stale set? The stale set is keyed by
+ * `slotKey`, so the lookup must key the same way — both a blueprint slot and a
+ * `buildPaperModel` question resolve through `slotKey`, which is why the model
+ * question has to carry its slot `label`.
+ */
+export function slotIsStale(staled, q) {
+  return Array.isArray(staled) && staled.includes(slotKey(q));
+}
+
 /** "any three" for an ANY_N optional-answer question, else null. */
 export function anyText(q) {
   const n = q && q.optionalRule && q.optionalRule.n;

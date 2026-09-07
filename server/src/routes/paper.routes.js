@@ -9,6 +9,7 @@ import {
   indexPaperQuestions
 } from '../controllers/paper.controller.js';
 import { generatePaper, jobStatus } from '../controllers/generate.controller.js';
+import { createManualPaper } from '../controllers/manual-paper.controller.js';
 import { handleUploadMiddleware } from '../middlewares/upload.middleware.js';
 import { aiLimiter, defaultLimiter } from '../middlewares/rate-limit.middleware.js';
 
@@ -23,6 +24,9 @@ router.post('/upload', aiLimiter, handleUploadMiddleware, uploadPaper);
 
 // POST /api/papers/analyze   (step 1: parse + blueprint + availableUnits, no generation)
 router.post('/analyze', aiLimiter, analyzePaper);
+
+// POST /api/papers/manual     (Mode B step 1: teacher-defined blueprint + availableUnits, no generation)
+router.post('/manual', aiLimiter, createManualPaper);
 
 // POST /api/papers/extract-text
 router.post('/extract-text', aiLimiter, extractPaperText);

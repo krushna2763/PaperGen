@@ -28,6 +28,24 @@ const HEADING_RE = new RegExp(
 const isHeading = (line) => HEADING_RE.test(String(line || '').trim());
 
 /**
+ * Detect the most plausible HEADING in a chunk's text — the same heuristic the
+ * chunker uses to split, applied per stored chunk. Used to group a unit's
+ * chunks into teacher-facing topics (GET /kb/topics): the first heading line
+ * of the chunk is its topic candidate; chunks without headings fall under a
+ * generic bucket. Never invented — absent headings yield null.
+ * @param {string} chunkText
+ * @returns {string|null}
+ */
+export function detectChunkHeading(chunkText) {
+  const lines = String(chunkText || '').split('\n');
+  for (const line of lines) {
+    const t = line.trim();
+    if (t && isHeading(t)) return t.slice(0, 120);
+  }
+  return null;
+}
+
+/**
  * @param {string} text - cleaned notes text (already OCR-merged upstream)
  * @returns {Array<{ text: string, chunkIndex: number }>}
  */
@@ -78,4 +96,4 @@ export function chunkNotes(text) {
   return merged.map((chunkText, chunkIndex) => ({ text: chunkText, chunkIndex }));
 }
 
-export default { chunkNotes };
+export default { chunkNotes, detectChunkHeading };

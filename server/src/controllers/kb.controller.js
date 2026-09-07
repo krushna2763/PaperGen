@@ -3,6 +3,7 @@ import { pdfParser } from '../document/pdf-parser.js';
 import { chunkNotes } from '../document/notes-chunker.js';
 import { embeddingService } from '../rag/embeddings.js';
 import { qdrantStore } from '../rag/qdrant.js';
+import { checkTopicCoverage } from '../rag/topic-coverage.js';
 
 /**
  * Knowledge-base (syllabus corpus) controller.
@@ -83,4 +84,54 @@ export const listUnits = async (req, res, next) => {
   }
 };
 
-export default { uploadNotes, listUnits };
+/**
+ * GET /api/kb/topics?class=&subject=&unit=  ->  [{ topic, chunkCount }]
+ *
+ * Mode B topic anchoring: the chapters detected in ONE unit's notes (heading
+ * detection over the syllabus chunks, grouped like listUnitsWithNotes).
+ * Suggestions only — the client renders them as combobox options; the teacher
+ * can always type a topic of their own (checked via /kb/topics/coverage).
+ */
+export const listTopics = async (req, res, next) => {
+  try {
+    const cls = String(req.query.class ?? '').trim();
+    const subject = String(req.query.subject ?? '').trim();
+    const unit = String(req.query.unit ?? '').trim();
+    if (!cls || !subject || !unit) {
+      return res.status(400).json({ success: false, message: '"class", "subject" and "unit" query params are required.' });
+    }
+    const topics = await qdrantStore.listTopicsWithNotes({ class: cls, subject, unit });
+    return res.status(200).json({ success: true, data: topics });
+  } catch (error) {
+    console.error('[KB Controller] listTopics error:', error);
+    next(error);
+  }
+};
+
+/**
+ * GET /api/kb/topics/coverage?class=&subject=&unit=&topic=  ->
+ *   { matched, chunkCount, topScore, unit }
+ *
+ * Coverage check for a TYPED topic (free text in the combobox): embeds it and
+ * searches that unit's syllabus corpus — reusing the ONE shared coverage
+ * mechanism (rag/topic-coverage.js), also used for server-side warnings.
+ * An unmatched topic is a warning to surface inline, NEVER a block.
+ */
+export const topicCoverage = async (req, res, next) => {
+  try {
+    const cls = String(req.query.class ?? '').trim();
+    const subject = String(req.query.subject ?? '').trim();
+    const unit = String(req.query.unit ?? '').trim();
+    const topic = String(req.query.topic ?? '').trim();
+    if (!cls || !subject || !unit || !topic) {
+      return res.status(400).json({ success: false, message: '"class", "subject", "unit" and "topic" query params are required.' });
+    }
+    const coverage = await checkTopicCoverage({ topic, class: cls, subject, unit });
+    return res.status(200).json({ success: true, data: coverage });
+  } catch (error) {
+    console.error('[KB Controller] topicCoverage error:', error);
+    next(error);
+  }
+};
+
+export default { uploadNotes, listUnits, listTopics, topicCoverage };

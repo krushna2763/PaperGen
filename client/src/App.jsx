@@ -1,9 +1,18 @@
 import { useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react';
 import { paperService, kbService } from './services/api.js';
 import ConfirmScreen from './components/ConfirmScreen.jsx';
+import ModeChooser from './components/ModeChooser.jsx';
+import PaperDetails from './components/PaperDetails.jsx';
+import QuestionBuilder from './components/QuestionBuilder.jsx';
+import ReviewPaper from './components/ReviewPaper.jsx';
 import { buildPaperModel, paginatePaper } from './services/paperLayout.js';
 import { createPaperPdfBlob, paperFileName } from './services/paperPdf.js';
 import { DEFAULT_PAPER_FORMAT, PAPER_LAYOUT, optionLabels, templateToFormat } from './services/paperTemplate.js';
+import {
+  paperFingerprints,
+  staleSlots,
+} from './services/staleness.js';
+import { mergeRegeneratedResult } from './services/regenResult.js';
 
 /* ─────────────────────────────────────────────────────────────
    Constants
@@ -331,7 +340,9 @@ function loadStoredFormat() {
     /* ignore corrupted storage */
   }
   return { ...DEFAULT_PAPER_FORMAT };
-}/* ─────────────────────────────────────────────────────────────
+}
+
+/* ─────────────────────────────────────────────────────────────
    Paper preview renderers (screen = same model as the real PDF)
 ───────────────────────────────────────────────────────────── */
 const paperCss = { fontFamily: PAPER_LAYOUT.serifCss, fontSize: 12, lineHeight: 1.72, color: '#111', minHeight: '100%' };
@@ -475,8 +486,13 @@ export default function App() {
   // (structure vs visual) — they stay separate states.
   const [template, setTemplate] = useState(null);
 
-  // Two-step flow: idle → uploading → analyzing → confirm → generating → review
-  const [phase, setPhase] = useState('idle');
+  // Two-step flow: choosing → (Mode A) idle → uploading → analyzing → confirm → generating → review
+  //                          → (Mode B) details → building → confirm → generating → review
+  // The app lands on 'choosing' (the mode chooser); picking a mode routes into
+  // that mode's first screen.
+  const [phase, setPhase] = useState('choosing');
+  const [mode, setMode] = useState(null); // null | 'A' | 'B'
+  const [manualMeta, setManualMeta] = useState({ class: '10', subject: '' });
   const [jobId, setJobId] = useState(null);
   const [availableUnits, setAvailableUnits] = useState([]);
   const [slotProgress, setSlotProgress] = useState([]);
@@ -485,16 +501,93 @@ export default function App() {
   const [elapsed, setElapsed] = useState(0);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
+  const [initialAssign, setInitialAssign] = useState(null); // Mode B handoff
+
+  // Mode B only: the structure stays editable after generation, so the
+  // generated snapshot is captured once and compared to the current blueprint
+  // on every render. Reused by the review screen AND the download warning, so
+  // it lives here, not in the editor component.
+  // `null` until a Mode B paper exists — Mode A papers never go stale.
+  const [generatedFingerprint, setGeneratedFingerprint] = useState(null);
 
   const [pageIndex, setPageIndex] = useState(0);
   const [zoom, setZoom] = useState(100);
   const [pageH, setPageH] = useState(900);
 
+  // Mode B review + download: stale slots live here so both the review screen
+  // and the download warning consume the same set.
+  const staled = useMemo(
+    () =>
+      mode === 'B' && generatedFingerprint && blueprint
+        ? staleSlots(generatedFingerprint, paperFingerprints(blueprint))
+        : [],
+    [mode, generatedFingerprint, blueprint]
+  );
+  const staledCount = staled.length;
+
   // Derived phase flags for the two-step flow (analyze → confirm → generate).
   const analyzing = phase === 'uploading' || phase === 'analyzing';
   const generating = phase === 'generating';
   const showConfirm = (phase === 'confirm' || generating) && !!blueprint;
+  const showReview = !showConfirm && !!result && !!blueprint;
   const busy = analyzing || generating;
+  // Mode B builder screens occupy the left column while active. ('choosing' is
+  // its own top-level branch — mode is still null there — so it is not listed.)
+  const modeBActive = mode === 'B' && ['details', 'building'].includes(phase);
+
+  /** Mode B: the manual endpoint returned — same shape as analyze. */
+  const handleManualCreated = ({ jobId: id, blueprint: bp, availableUnits: units2, assignments }) => {
+    setError(null);
+    setBlueprint(bp);
+    setJobId(id);
+    setAvailableUnits(Array.isArray(units2) ? units2 : []);
+    setInitialAssign(assignments ?? null);
+    setSettings((s) => ({ ...s, class: manualMeta.class || s.class }));
+    // Mode B's subject comes from PaperDetails, not a filename — sync it so the
+    // generate request and the notes-corpus label are the teacher's subject.
+    setSubject(String(manualMeta.subject || '').trim() || DEFAULT_SUBJECT);
+    setPhase('confirm');
+    // NOTE: generatedFingerprint is NOT set here — see handleGenerate. At this
+    // point there is no generated paper, so capturing now would snapshot an empty
+    // state and every later unit assignment would look like a change.
+  };
+
+  /**
+   * Wipe everything that belongs to one mode's run so the other mode starts
+   * clean. Called on every mode switch and on "back to the chooser". `format`
+   * survives on purpose — it is the paper's visual template (persisted to
+   * localStorage), shared by both modes and not a per-run value.
+   */
+  const clearRunState = () => {
+    setFile(null);
+    setDragOver(false);
+    setBlueprint(null);
+    setTemplate(null);
+    setJobId(null);
+    setAvailableUnits([]);
+    setInitialAssign(null);
+    setResult(null);
+    setGeneratedFingerprint(null);
+    setSlotProgress([]);
+    setNotesMsg('');
+    setProgress('');
+    setError(null);
+    setSubject(DEFAULT_SUBJECT);
+    setPageIndex(0);
+    setZoom(100);
+  };
+
+  const chooseMode = (m) => {
+    clearRunState();
+    setMode(m);
+    setPhase(m === 'B' ? 'details' : 'idle');
+  };
+
+  const resetToModeChoice = () => {
+    clearRunState();
+    setMode(null);
+    setPhase('choosing');
+  };
 
   const fileInputRef = useRef(null);
   const pageRef = useRef(null);
@@ -726,8 +819,29 @@ export default function App() {
    * STEP 2 — Generate: POST /papers/:jobId/generate with the (possibly
    * teacher-corrected) blueprint, difficulty and the slotUnitMap built on the
    * confirm screen. Everything travels in the body — no server-side state.
+   *
+   * MODE B FINGERPRINT TIMING (task §1):
+   *   The generated-structure snapshot is captured HERE, on the generate response,
+   *   not in handleManualCreated. Sequence:
+   *     1. Mode B builder POSTs /papers/manual → handleManualCreated(
+   *          { jobId, blueprint, availableUnits, assignments }
+   *        )  → setsBlueprint, setJobId, setPhase('confirm').
+   *        NO generatedFingerprint yet — there is no generated paper.
+   *     2. Teacher lands on ConfirmScreen, assigns units, clicks Generate.
+   *        ConfirmScreen calls onGenerate(buildSlotUnitMap(...)).
+   *     3. App calls /papers/:jobId/generate with { blueprint, difficulty,
+   *        slotUnitMap }.
+   *     4. On the generate RESPONSE, App setsResult(...) AND
+   *        setGeneratedFingerprint(paperFingerprints(blueprint)).
+   *        From this point on, any later structural edit makes a slot stale.
+   *     5. Phase moves to 'review'; ReviewPaper renders with staled/staledCount.
+   *
+   *   Why not in handleManualCreated: at that point there is no paper at all,
+   *   so every later unit assignment would register as a change against an
+   *   empty snapshot. By capturing after generation, the snapshot reflects the
+   *   ACTUAL generated structure, and staleness only triggers on real edits.
    */
-  const handleConfirmGenerate = async (slotUnitMap) => {
+  const handleGenerate = async (slotUnitMap) => {
     if (!jobId || !blueprint) return;
     setError(null);
     setPhase('generating');
@@ -742,21 +856,58 @@ export default function App() {
         slotUnitMap,
       });
       setResult(genRes.data);
+      // Snapshot the generated structure AFTER the response lands, so the
+      // fingerprint reflects the ACTUAL generated paper — not an empty state
+      // taken at handleManualCreated time.
+      setGeneratedFingerprint(paperFingerprints(blueprint));
       setPhase('review');
       setPageIndex(0);
       setZoom(100);
     } catch (err) {
       const data = err?.response?.data;
-      // 422 = slotUnitMap contract failure — show which slots to fix and stay
-      // on the confirm screen so the teacher can correct them.
-      const detail = Array.isArray(data?.errors) && data.errors.length > 0
-        ? ` (${data.errors.slice(0, 3).join('; ')})`
-        : '';
+      // The 422 body carries `errors: [{ slot, message }]`. Show each slot with
+      // its message so the teacher can fix the one row named, instead of the
+      // "[object Object]" that a bare join produced.
+      const lines = Array.isArray(data?.errors)
+        ? data.errors
+            .map((e) => {
+              if (typeof e === 'string') return e;
+              if (e && e.message) return e.slot ? `${e.slot}: ${e.message}` : e.message;
+              return null;
+            })
+            .filter(Boolean)
+        : [];
+      const detail = lines.length > 0 ? `\n• ${lines.join('\n• ')}` : '';
       setError((data?.message || err?.message || 'Generation failed. Please try again.') + detail);
       setPhase('confirm');
     } finally {
       setProgress('');
       setSlotProgress([]);
+    }
+  };
+
+  /**
+   * Mode B only: regenerate ONE stale slot to clear its flag. The teacher may
+   * edit several fields in a row, so we never auto-regenerate — each keystroke
+   * would cost an LLM call and discard in-progress edits. Regenerate when ready.
+   */
+  const regenerateStaleSlot = async (slotKey) => {
+    if (!jobId || !blueprint || mode !== 'B') return;
+    try {
+      const genRes = await paperService.generate(jobId, {
+        blueprint,
+        class: settings.class,
+        subject,
+        difficulty: settings.difficulty,
+        slotUnitMap: { [slotKey]: { unit: null } },
+      });
+      // The server re-ran the whole paper (there is no single-slot endpoint);
+      // its response already carries every slot in order. Render it as-is.
+      setResult((prev) => mergeRegeneratedResult(prev, genRes.data));
+      // Re-snapshot after the fresh content lands so the flag clears.
+      setGeneratedFingerprint(paperFingerprints(blueprint));
+    } catch (err) {
+      setError(err?.response?.data?.message || err?.message || 'Regeneration failed. Please try again.');
     }
   };
 
@@ -806,6 +957,16 @@ export default function App() {
   };
 
   const downloadPdf = async () => {
+    // Mode B only: warn before downloading while any slot is structurally stale
+    // (content written against the old structure). Do not block — a draft is a
+    // legitimate thing to want — but do not let it pass unnoticed.
+    if (mode === 'B' && staledCount > 0) {
+      const confirmed = window.confirm(
+        `${staledCount} question${staledCount === 1 ? '' : 's'} ha${staledCount === 1 ? 's' : 've'} changed since generation. ` +
+        'The downloaded content will not match the current structure. Download anyway?'
+      );
+      if (!confirmed) return;
+    }
     if (!hasPaper) return;
     try {
       setError(null);
@@ -824,6 +985,15 @@ export default function App() {
   };
 
   const printPaper = () => {
+    // Same staleness rule as download — a stale paper is a legitimate draft, but
+    // it should not print without the teacher seeing the warning.
+    if (mode === 'B' && staledCount > 0) {
+      const confirmed = window.confirm(
+        `${staledCount} question${staledCount === 1 ? '' : 's'} ha${staledCount === 1 ? 's' : 've'} changed since generation. ` +
+        'The printed content will not match the current structure. Print anyway?'
+      );
+      if (!confirmed) return;
+    }
     if (!hasPaper) return;
     const iframe = document.createElement('iframe');
     iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;';
@@ -846,7 +1016,9 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#f8f9fa]">
-      {/* ── Header ─────────────────────────────────────────── */}
+      {/* ── Staleness review screen (Mode B): rendered where the
+          'Generated Question Paper' panel lives, replacing it when a
+          Mode B paper is in review. Mode A keeps the existing path. ── */}
       <header className="bg-white border-b border-gray-200">
         <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
@@ -879,6 +1051,36 @@ export default function App() {
         <div className="grid grid-cols-12 gap-6 items-start">
           {/* ── Left column ────────────────────────────────── */}
           <div className="col-span-12 lg:col-span-5 space-y-6">
+            {/* Entry point: the mode chooser owns the left column until a mode
+                is picked. Picking A routes to the upload flow below; picking B
+                routes into the manual builder (details → building). */}
+            {phase === 'choosing' && (
+              <ModeChooser onSelect={chooseMode} />
+            )}
+
+            {/* Mode B: details → builder (upload flow hidden) */}
+            {modeBActive && (
+              <>
+                {phase === 'details' && (
+                  <PaperDetails
+                    meta={manualMeta}
+                    onChange={setManualMeta}
+                    onBack={resetToModeChoice}
+                    onNext={() => setPhase('building')}
+                  />
+                )}
+                {phase === 'building' && (
+                  <QuestionBuilder
+                    paperMeta={manualMeta}
+                    onCreated={handleManualCreated}
+                    onCancel={() => setPhase('details')}
+                  />
+                )}
+              </>
+            )}
+
+            {mode === 'A' && (
+            <>
             {/* 1. Upload */}
             <Card>
               <CardHeader icon={<FileTextIcon className="text-gray-500" size={19} />} title="1. Upload Previous Year Paper" />
@@ -1119,11 +1321,16 @@ export default function App() {
                 )}
               </div>
             </Card>
+            </>
+            )}
           </div>
 
-          {/* ── Right column ───────────────────────────────── */}
+          {/* ── Right column (hidden on the mode chooser — nothing to show
+              until a mode is picked) ─────────────────────────── */}
+          {phase !== 'choosing' && (
           <div className="col-span-12 lg:col-span-7">
-            <Card className="min-h-[420px]">                <div className="flex items-center gap-2.5 px-5 pt-5">
+            <Card className="min-h-[420px]">
+              <div className="flex items-center gap-2.5 px-5 pt-5">
                   {showConfirm ? (
                     <>
                       <CheckCircleIcon className="text-blue-600" size={19} />
@@ -1141,8 +1348,26 @@ export default function App() {
                   {error && (
                     <div className="flex items-start gap-2.5 bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm">
                       <AlertIcon size={17} className="shrink-0 mt-0.5" />
-                      <span>{error}</span>
+                      <span className="whitespace-pre-line">{error}</span>
                     </div>
+                  )}
+
+                  {/* The card header above already names this step
+                      (showConfirm ? "Review Blueprint" : "Generated Question
+                      Paper"); the review screen replaces the body only. */}
+                  {showReview && (
+                    <ReviewPaper
+                      mode={mode}
+                      blueprint={blueprint}
+                      result={result}
+                      staled={staled}
+                      staledCount={staledCount}
+                      regenerateStaleSlot={regenerateStaleSlot}
+                      onDownload={downloadPdf}
+                      onPrint={printPaper}
+                      onOpen={openPdf}
+                      onBack={resetToModeChoice}
+                    />
                   )}
 
                   {showConfirm && (
@@ -1162,8 +1387,10 @@ export default function App() {
                         difficulty={settings.difficulty}
                         onDifficultyChange={(d) => setSettings((s) => ({ ...s, difficulty: d }))}
                         onAddNotes={handleAddNotes}
-                        onGenerate={handleConfirmGenerate}
+                        onGenerate={handleGenerate}
                         busy={generating}
+                        initialAssign={initialAssign}
+                        source={mode === 'B' ? 'manual' : 'reference'}
                       />
                       {generating && slotProgress.length > 0 && (
                         <p className="mt-3 text-xs text-gray-500">
@@ -1304,6 +1531,7 @@ export default function App() {
                 </div>
             </Card>
           </div>
+          )}
         </div>
       </main>
     </div>

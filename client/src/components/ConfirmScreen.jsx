@@ -92,7 +92,10 @@ export default function ConfirmScreen({
   onAddNotes,
   onGenerate,
   busy = false,
+  initialAssign = null, // Mode B: unit assignments pre-seeded in the builder
+  source = 'reference', // 'reference' (Mode A, uploaded paper) | 'manual' (Mode B, teacher-built)
 }) {
+  const fromReference = source !== 'manual';
   const questions = blueprint?.questions || [];
   const coerceId = (raw) => {
     const hit = units.find((u) => String(u.id) === String(raw));
@@ -108,7 +111,18 @@ export default function ConfirmScreen({
     const stamp = blueprint?.jobId || JSON.stringify(questions.map((q, i) => slotKey(q, i))) + '|' + units.map((u) => u.id).join(',');
     if (seededFor.current === stamp) return;
     seededFor.current = stamp;
-    setAssign(defaultAssign(blueprint, units));
+    // Mode B handoff: the builder's pre-assignments win when a row's unit is
+    // present in the unit list; everything else falls back to the default.
+    setAssign((prev) => {
+      const base = defaultAssign(blueprint, units);
+      if (prev && Object.keys(prev).length > 0 && initialAssign == null) return prev;
+      if (initialAssign == null) return base;
+      const merged = { ...base };
+      for (const [k, v] of Object.entries(initialAssign)) {
+        if (v?.unit != null && merged[k]) merged[k] = { ...merged[k], unit: v.unit, items: {} };
+      }
+      return merged;
+    });
     setExpanded(new Set());
   }, [blueprint, units]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -192,12 +206,17 @@ export default function ConfirmScreen({
           </span>
         </div>
         <p className="mt-2 text-[12px] text-gray-500">
-          Question types, item counts and marks come from the reference paper and cannot be edited here.
+          {fromReference
+            ? 'Question types, item counts and marks come from the reference paper and cannot be edited here.'
+            : 'Question types, item counts and marks are as you set them in the builder and are locked for generation.'}
         </p>
         {warnings.length > 0 && (
           <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
             <p className="flex items-center gap-1.5 text-[12px] font-medium text-amber-800">
-              <AlertIcon size={14} /> The reference paper did not parse cleanly — check before generating:
+              <AlertIcon size={14} />{' '}
+              {fromReference
+                ? 'The reference paper did not parse cleanly — check before generating:'
+                : 'Check these before generating:'}
             </p>
             <ul className="mt-1 list-disc pl-6 text-[12px] text-amber-800">
               {warnings.map((w, i) => (

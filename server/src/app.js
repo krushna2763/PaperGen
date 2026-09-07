@@ -7,6 +7,7 @@ import healthRoutes from './routes/health.routes.js';
 import paperRoutes from './routes/paper.routes.js';
 import questionRoutes from './routes/question.routes.js';
 import kbRoutes from './routes/kb.routes.js';
+import templateRoutes from './routes/template.routes.js';
 
 const app = express();
 
@@ -35,6 +36,7 @@ app.use(morgan('dev'));
 app.use('/api', healthRoutes);
 app.use('/api/papers', paperRoutes);
 app.use('/api/kb', kbRoutes);
+app.use('/api/templates', templateRoutes);
 app.use('/api', questionRoutes);
 
 // Root route

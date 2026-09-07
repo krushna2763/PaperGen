@@ -139,6 +139,11 @@ export function normalizeBlueprint(raw) {
       const stem = String(q?.stem ?? '').trim();
       const label = String(q?.label ?? `Q${i + 1}`).trim() || `Q${i + 1}`;
       const bpType = normalizeBlueprintType(q?.type);
+      // Per-slot difficulty — ADDITIVE contract field shared by both paths.
+      // Mode B (manual builder) sets it per question; extracted (Mode A) slots
+      // never set it, so the generator falls back to the paper-level value.
+      // Anything outside the canonical trio is dropped, not guessed.
+      const slotDifficulty = ['Easy', 'Medium', 'Difficult'].includes(q?.difficulty) ? q.difficulty : null;
       // itemsIndependent: honour an explicit boolean; otherwise derive from
       // type / construction. NEVER null — an absent flag silently disables
       // per-item assignment on the client.
@@ -160,6 +165,7 @@ export function normalizeBlueprint(raw) {
         number: i + 1,
         label,
         type: bpType,
+        difficulty: slotDifficulty,
         itemsIndependent,
         marksComplete,
         stem,

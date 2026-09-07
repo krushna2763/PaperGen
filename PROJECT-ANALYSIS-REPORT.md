@@ -1,9 +1,10 @@
 # 📊 Complete Project Report — PaperGen AI
 
 **Project:** AI-Powered Agentic RAG Question Generator (`paper-setting-ai-agent`) v1.0.0
-**Report date:** September 6, 2026
-**Codebase:** ~10,470 lines of application JS across 116 files (client + server, excl. deps)
+**Report date:** September 6, 2026 *(updated after security hardening + ESLint wiring + history rewrite)*
+**Codebase:** ~10,500 lines of application JS across 116 files (client + server, excl. deps)
 **Structure:** npm workspaces — `client/` (React 18 + Vite 6 + Tailwind), `server/` (Express 4 + LangGraph)
+**Repo:** `github.com/krushna2763/PaperGen` — single clean root commit, `main` pushed
 
 ---
 
@@ -11,25 +12,31 @@
 
 PaperGen AI turns a **previous-year exam paper (PDF)** into a **new, notes-grounded question paper**. It combines deterministic PDF parsing, a Qdrant-backed dual-corpus vector store (past papers + syllabus notes), Gemini embeddings/LLM via an 8-key failover pool, and a LangGraph agent pipeline with quality gates and targeted regeneration.
 
-**Verdict as of this report: the product works end-to-end.** The three critical issues found in the original analysis have been fixed and verified in a live browser E2E test. The remaining work is security hardening and test depth.
+**Verdict as of this report: the product works end-to-end, is security-hardened for a non-local deploy, and is lint-guarded at commit time.** Every P0 from the original analysis is closed. What remains is auth (for public/multi-user deployment), CI, and deeper pipeline tests.
 
 | Area | Grade | Notes |
 |---|---|---|
 | Backend architecture | ★★★★★ | Layered, latency-optimized LangGraph pipeline, exceptional comments discipline |
 | Vector/RAG design | ★★★★☆ | Dual corpora, per-slot question-level RAG, hash-based ingestion dedup |
-| Frontend | ★★★★☆ | Two-step flow now fully wired (was broken); 1,161-line App.jsx monolith remains |
-| Tests | ★★★☆☆ | 45 tests all passing (33 server + 12 client); deterministic modules only |
-| Security & config | ★★☆☆☆ | Open CORS, no auth/rate-limit, leaked Qdrant URL in source |
-| Docs | ★★★☆☆ | README still describes the old single-step flow |
+| Frontend | ★★★★☆ | Two-step flow fully wired and E2E-verified; 1,300-line App.jsx monolith remains |
+| Security & config | ★★★★☆ | CORS allowlist, two-tier rate limiting, SSRF guard, helmet, no secrets in repo; auth still open |
+| Tests & lint | ★★★☆☆ | 51 tests passing + ESLint (`no-undef` etc.) blocking `npm test`; pipeline still untested |
+| Docs | ★★☆☆☆ | README still describes the old single-step flow — now the weakest point |
 
 ### ✅ Fixed since the original analysis (all verified)
 
 | # | Original issue | Status |
 |---|---|---|
-| C1 | App.jsx `ReferenceError: generating is not defined` → white-screen | ✅ **Fixed** — replaced with the `phase` state machine + derived flags |
+| C1 | App.jsx `ReferenceError: generating is not defined` → white-screen | ✅ **Fixed** — replaced with the `phase` state machine; **and the bug class is now un-committable** (ESLint `no-undef` wired into `npm test`) |
 | C2 | Two-step flow dead code: `ConfirmScreen` never rendered, `/papers/analyze` + `/papers/:jobId/generate` never called | ✅ **Fixed** — full analyze → confirm → generate flow wired and E2E-verified in the browser |
-| C3 | No git repository | ✅ **Fixed** — initial commit `f607bd4` exists |
-| B1 (found during E2E) | Validation deadlock: slots with *unknown reference marks* (e.g. "Match the following") were rejected unconditionally → 0/N accepted | ✅ **Fixed** — `deterministicCheck` now receives the blueprint slot and exempts marks when the reference has none; semantic + blueprint validators still apply |
+| C3 | No git repository → later: leaked Qdrant URL pushed in the initial commit | ✅ **Fixed** — repo rewritten: everything squashed into one clean root commit (`5a21f5f`) and force-pushed; the leaked URL is **no longer in the remote history**. Secret scan before push (also redacted the URL quoted in this report). `server/.env` verified gitignored throughout |
+| B1 | Validation deadlock: slots with *unknown reference marks* rejected unconditionally → 0/N accepted | ✅ **Fixed** — `deterministicCheck` receives the blueprint slot and exempts marks when the reference has none |
+| SEC1 | Hardcoded real Qdrant Cloud URL as default | ✅ **Fixed** — default is `http://localhost:6333`; the leaked URL was purged from the pushed history (see C3) |
+| SEC2 | `cors()` wide open; `CORS_ORIGIN` dead config | ✅ **Fixed** — `cors({ origin: env.CORS_ORIGIN })`; verified live (evil origin gets no ACAO header) |
+| SEC3 | No rate limiting on paid-call endpoints | ✅ **Fixed** — two tiers: `aiLimiter` 6 req/min on every Gemini/ingest route, `defaultLimiter` 120 req/min on reads; verified live (6×400 → 429) |
+| SEC4 | SSRF: arbitrary `fileUrl` fetched server-side | ✅ **Fixed** — `assertStorageFileUrl` allows only `https://<CLOUDINARY_HOST>/<CLOUDINARY_CLOUD_NAME>/…`, fails closed with no cloud configured; 6 unit tests + live probe |
+| SEC5 | No security headers | ✅ **Fixed** — `helmet()` (CSP off: JSON API); HSTS, X-Frame-Options, nosniff, COOP/CORP verified live |
+| LINT | No lint layer anywhere (the C1 crash would have been caught by `no-undef`) | ✅ **Fixed** — ESLint 10 flat config in both workspaces; `npm test` runs lint before `node --test`; 20 findings resolved |
 
 ---
 
@@ -46,11 +53,12 @@ PaperGen AI turns a **previous-year exam paper (PDF)** into a **new, notes-groun
 │  blueprintUnits.js — slot/unit assignment math (unit-tested)                               │
 │  services/: api.js (axios, 10-min timeout) · paperLayout.js · paperPdf.js (pdfmake) ·      │
 │              paperTemplate.js (localStorage persistence) · fonts/LiberationSerif.js        │
+│  eslint.config.js — no-undef + no-unused-vars + react-hooks, lint runs before tests        │
 └──────────────────────────────────────────┬─────────────────────────────────────────────────┘
-                                           │ /api (Vite proxy → :5000)
+                                           │ /api (Vite proxy → :5000, CORS_ORIGIN allowlist)
 ┌──────────────────────────────────────────▼─────────────────────────────────────────────────┐
 │                              SERVER (Express 4, ES Modules)                                │
-│  routes → controllers → agents/services                                                    │
+│  helmet → CORS allowlist → routes (rate-limited) → controllers → agents/services           │
 │                                                                                            │
 │  Ingestion:   upload (Multer→Cloudinary) → extract-text → extract-questions                │
 │               → embed-questions (Gemini) → index-questions (Qdrant, hash-deduped)          │
@@ -61,6 +69,12 @@ PaperGen AI turns a **previous-year exam paper (PDF)** into a **new, notes-groun
 │                            GET  /papers/:jobId/status → per-slot progress (30-min TTL)     │
 │  Notes KB:                 POST /kb/notes · GET /kb/units?class&subject                    │
 │  Legacy flow (API-only):   POST /questions/generate (free-form RAG, no confirm step)       │
+│                                                                                            │
+│  RATE LIMITS: aiLimiter 6/min — upload, analyze, extract-*, embed, index, generate,        │
+│               kb/notes, questions/generate (every paid/heavy route)                        │
+│               defaultLimiter 120/min — health, status, check-indexed, kb/units (reads)     │
+│  SSRF GUARD:  assertStorageFileUrl — fileUrl must be https://res.cloudinary.com            │
+│               /<CLOUDINARY_CLOUD_NAME>/…; fail closed if cloud unset                       │
 │                                                                                            │
 │  AGENT PIPELINE (LangGraph StateGraph):                                                    │
 │    START → retrieve → generate → embedGenerated → evaluateBatch                            │
@@ -87,23 +101,23 @@ PaperGen AI turns a **previous-year exam paper (PDF)** into a **new, notes-groun
 
 ## 3. Complete API Reference
 
-| Method | Endpoint | Purpose | Auth |
+| Method | Endpoint | Purpose | Rate tier |
 |---|---|---|---|
-| GET | `/api/health` | Server + Qdrant + Gemini + Cloudinary status | — |
-| POST | `/api/papers/upload` | PDF upload → Cloudinary (15 MB cap, PDF-only) | — |
-| POST | `/api/papers/analyze` | Extract + lock blueprint → `{ jobId, blueprint, availableUnits }` | — |
-| POST | `/api/papers/extract-text` | Text extraction (with `fileUrl` support) | — |
-| POST | `/api/papers/extract-questions` | Deterministic question extraction | — |
-| POST | `/api/papers/check-indexed` | SHA-256 content-hash ingestion check | — |
-| POST | `/api/papers/embed-questions` | Gemini embeddings for extracted questions | — |
-| POST | `/api/papers/index-questions` | Index into `past_paper` corpus (Qdrant) | — |
-| POST | `/api/papers/:jobId/generate` | Blueprint-mode generation `{ blueprint, class, subject, difficulty, slotUnitMap }` | — |
-| GET | `/api/papers/:jobId/status` | Per-slot live progress | — |
-| POST | `/api/kb/notes` | Upload syllabus notes per (class, subject, unit) | — |
-| GET | `/api/kb/units` | List units with chunk counts | — |
-| POST | `/api/questions/generate` | Legacy free-form RAG generation | — |
+| GET | `/api/health` | Server + Qdrant + Gemini + Cloudinary status | 120/min |
+| POST | `/api/papers/upload` | PDF upload → Cloudinary (15 MB cap, PDF-only) | **6/min** |
+| POST | `/api/papers/analyze` | Extract + lock blueprint → `{ jobId, blueprint, availableUnits }` | **6/min** |
+| POST | `/api/papers/extract-text` | Text extraction (`fileUrl` → SSRF-guarded Cloudinary only) | **6/min** |
+| POST | `/api/papers/extract-questions` | Deterministic question extraction | **6/min** |
+| POST | `/api/papers/check-indexed` | SHA-256 content-hash ingestion check | 120/min |
+| POST | `/api/papers/embed-questions` | Gemini embeddings for extracted questions | **6/min** |
+| POST | `/api/papers/index-questions` | Index into `past_paper` corpus (Qdrant) | **6/min** |
+| POST | `/api/papers/:jobId/generate` | Blueprint-mode generation `{ blueprint, class, subject, difficulty, slotUnitMap }` | **6/min** |
+| GET | `/api/papers/:jobId/status` | Per-slot live progress | 120/min |
+| POST | `/api/kb/notes` | Upload syllabus notes per (class, subject, unit) | **6/min** |
+| GET | `/api/kb/units` | List units with chunk counts | 120/min |
+| POST | `/api/questions/generate` | Legacy free-form RAG generation | **6/min** |
 
-Error semantics: `400` invalid input · `404` unknown job · `422` blueprint/slotUnitMap contract violation (lists offending slots) · `502` model returned nothing.
+Error semantics: `400` invalid input / SSRF rejection · `404` unknown job · `422` blueprint/slotUnitMap contract violation (lists offending slots) · `429` rate limit exceeded (`RateLimitExceeded`, draft-7 headers) · `502` model returned nothing.
 
 ---
 
@@ -138,14 +152,19 @@ Error semantics: `400` invalid input · `404` unknown job · `422` blueprint/slo
 | Locked blueprint extraction + shape/normalization/validation | ✅ | `blueprint/*` (6 modules) |
 | Visual template auto-detection (header, numbering, marks style) | ✅ | `template-analyzer.js` |
 | Notes ingestion per (class, subject, unit) + unit listing | ✅ | `kb.controller.js`, `notes-chunker.js` |
-| **Two-step flow UI (analyze → confirm → generate)** | ✅ **fixed & verified** | `App.jsx`, `ConfirmScreen.jsx` |
-| Confirm screen: per-question/per-item unit assignment, live marks-per-unit bars | ✅ rendered | `ConfirmScreen.jsx` |
-| Per-slot live progress polling during generation | ✅ **wired (4 s interval)** | `App.jsx`, `job-store.js` |
+| **Two-step flow UI (analyze → confirm → generate)** | ✅ verified | `App.jsx`, `ConfirmScreen.jsx` |
+| Confirm screen: per-question/per-item unit assignment, live marks-per-unit bars | ✅ | `ConfirmScreen.jsx` |
+| Per-slot live progress polling during generation | ✅ (4 s interval) | `App.jsx`, `job-store.js` |
 | Question-level RAG (per-slot contexts) | ✅ | `retrieval.agent.js`, orchestrator |
-| Batch generation + refill + dedup | ✅ | `question-generator.agent.js` (637 lines) |
+| Batch generation + refill + dedup | ✅ | `question-generator.agent.js` |
 | Quality gate: deterministic → peer cosine → Qdrant source check → batch LLM validation | ✅ | `evaluateBatchNode` |
 | Targeted regeneration loop (MAX_RETRIES) + blueprint conformance re-check | ✅ | `blueprintCheckNode`, `regenerateFailedNode` |
-| Unknown-marks slot exemption in validation | ✅ **fixed** | `validation.agent.js`, `orchestrator.agent.js` |
+| Unknown-marks slot exemption in validation | ✅ | `validation.agent.js`, `orchestrator.agent.js` |
+| **CORS origin allowlist** | ✅ verified live | `app.js`, `env.CORS_ORIGIN` |
+| **Two-tier rate limiting (6/min AI · 120/min reads)** | ✅ verified live (6×400→429) | `rate-limit.middleware.js` + 4 route files |
+| **SSRF guard on all `fileUrl` endpoints (fail closed)** | ✅ 6 unit tests + live probe | `storage.service.js` |
+| **Security headers (helmet)** | ✅ verified live | `app.js` |
+| **ESLint flat config, wired into `npm test` (both workspaces)** | ✅ 0 findings | `eslint.config.js` ×2 |
 | 422 contract error surfaced per-slot on the confirm screen | ✅ | `App.jsx` |
 | PDF preview / download / print (pdfmake) | ✅ | `paperPdf.js`, `App.jsx` |
 | Latency + AI-call instrumentation (`meta.timing`, `meta.ai`) | ✅ | `perf-context.js` |
@@ -168,7 +187,7 @@ Error semantics: `400` invalid input · `404` unknown job · `422` blueprint/slo
 | Review | ✅ paper rendered with View PDF / Download / Back to Blueprint |
 | Outcome | **4/5 slots accepted**; Q3 honestly rejected (see below) |
 
-**The bug this test caught (and how it was fixed):** Q3's marks were not parseable from the reference paper. The blueprint validator treats unknown reference marks as "skip the check," but `deterministicCheck` rejected ANY question with missing marks unconditionally → every attempt failed → 0/5 accepted. Fix: the blueprint slot is now passed into `deterministicCheck`, which exempts the marks gate when the reference has none. Server tests updated and passing (33/33).
+**The bug this test caught (and how it was fixed):** Q3's marks were not parseable from the reference paper. The blueprint validator treats unknown reference marks as "skip the check," but `deterministicCheck` rejected ANY question with missing marks unconditionally → every attempt failed → 0/5 accepted. Fix: the blueprint slot is now passed into `deterministicCheck`, which exempts the marks gate when the reference has none. Server tests updated and passing.
 
 **Why Q3 still failed (correct behavior, content limitation):** the validator rejected generated match-pairs that referenced *Tinkling Bells story characters* absent from the indexed Ch2 summary-notes chunks. The topic-grounding gate worked as designed. Remedies: upload richer Ch2 notes (with the story), or allow MATCH columns to draw from the past-paper context pool (policy change that loosens grounding).
 
@@ -176,59 +195,67 @@ Screenshots: `e2e-screenshots/unit-assignment-confirm.png`, `unit-assignment-rev
 
 ---
 
-## 7. 🔴 Remaining Critical / High Issues
+## 7. Security Posture
 
-### R1. Security posture (unchanged — highest remaining priority)
+### Completed hardening (this iteration)
 
-| # | Severity | Finding | Location | Recommendation |
-|---|---|---|---|---|
-| S1 | High | **Leaked internal Qdrant cloud URL hardcoded as default** (redacted here; was committed in the initial commit) | `server/src/config/env.js` | Default to `http://localhost:6333` (as `.env.example` does); rotate the cluster credentials |
-| S2 | High | **CORS wide open** — `app.use(cors())`; the parsed `CORS_ORIGIN` config is dead code | `server/src/app.js:12` | `app.use(cors({ origin: env.CORS_ORIGIN }))` |
-| S3 | Medium | **No authentication or rate limiting**; generate/ingest endpoints trigger paid Gemini calls from anyone | `app.js` | `express-rate-limit` minimum; auth if multi-user |
-| S4 | Medium | `extract-text` / `extract-questions` / `embed-questions` / `index-questions` accept arbitrary `fileUrl` (SSRF surface) | `paper.controller.js` | Restrict to the storage domain / known publicIds |
-| S5 | Low | No `helmet()` security headers; 10 MB JSON limit generous | `app.js` | Add `helmet()` in production |
-| S6 | Low | In-memory job store / embedding cache / progress — not multi-instance safe | `job-store.js` | Documented prototype trade-off; move to Redis for scale |
+| Control | Implementation | Verification |
+|---|---|---|
+| Secret hygiene | No secrets in repo; `server/.env` gitignored; leaked Qdrant URL purged from pushed history via squash + force-push (`5a21f5f` is the only commit on the remote) | secret scan over all trackable files pre-push: clean |
+| CORS | `cors({ origin: env.CORS_ORIGIN })` — allowlist, not `*` | live probe: disallowed origin receives no ACAO header |
+| Rate limiting | `aiLimiter` (6/min) on all 9 paid/heavy routes; `defaultLimiter` (120/min) on reads; shared singletons (no double-count); draft-7 `RateLimit-*` headers | live probe: exactly 6×400 then 429 |
+| SSRF | `assertStorageFileUrl`: HTTPS + host allowlist (`CLOUDINARY_HOST`) + cloud-name path check; fail closed when `CLOUDINARY_CLOUD_NAME` unset; runs before any network I/O | 6 unit tests (`ssrf-guard.test.js`) + live probe on metadata URL → 400 |
+| Headers | `helmet({ contentSecurityPolicy: false })` (JSON API, no served HTML) | live probe: HSTS, XFO, nosniff, COOP, CORP present |
+| Lint gate | ESLint `no-undef` + `no-unused-vars` (+ react-hooks on client) run before every `npm test` | 0 findings in both workspaces |
 
-Positives: secrets correctly gitignored (`.env` gitignored, `.env.example` templated), Multer enforces extension **and** MIME **and** size, client computes SHA-256 locally.
+### Remaining (known, deliberate for prototype scope)
 
-### R2. Test depth
-
-Zero automated coverage for the agent pipeline (orchestrator, generator, validation) and routes — the most complex logic in the repo. The LLM/Qdrant boundaries are already behind services, so stubbed node-integration tests would be high-value. No ESLint anywhere (the original C1 crash would have been caught by `no-undef`).
+| # | Severity | Finding | Recommendation |
+|---|---|---|---|
+| R1 | Medium | **No authentication** — rate limiting caps spend but doesn't identify users; fine for single-school local use, required before any public/multi-user deploy | API-key or session auth on the AI tier |
+| R2 | Low | In-memory job store / embedding cache / progress — not multi-instance safe | Move to Redis when scaling out |
+| R3 | Info | Reverse-proxy deployments need `app.set('trust proxy', 1)` so limiter buckets key on real client IPs | Add when deploying behind nginx/Cloudflare |
+| R4 | Info | Qdrant cluster rotation is now **optional defense-in-depth** (URL no longer in remote history; API key never committed) — GitHub can serve SHA-addressed dangling commits transiently until GC | Rotate when convenient, or ask GitHub Support to purge the dangling old commit |
 
 ---
 
 ## 8. Code Quality
 
 ### Strengths
-- **Exceptional comments-to-code discipline** — nearly every non-obvious decision (why 10 MB JSON limit, why fallback models are LLM-only, why dedup uses full text in blueprint mode) is documented at the point of decision.
+- **Exceptional comments-to-code discipline** — nearly every non-obvious decision is documented at the point of decision.
 - Clean separation: routes → controllers → agents/services; agents never touch storage infra directly.
 - Deterministic modules are pure and therefore fully testable.
 - Sensible, consistent HTTP error semantics including the 422 contract-failure channel.
+- **ESLint-clean codebase** with an intentional-exception policy: the 2 non-mechanical `no-unused-vars` findings (Express error-handler arity, reserved parser param) were resolved with `_` prefixes + explanatory comments, not rule silencing.
 
 ### Weaknesses
 
 | Issue | Where | Suggestion |
 |---|---|---|
-| App.jsx is a ~1,200-line monolith (icons, components, export, state machine, API orchestration) | `client/src/App.jsx` | Split into `components/`, `hooks/`, `useGenerationFlow` |
+| App.jsx is a ~1,300-line monolith (icons, components, export, state machine, API orchestration) | `client/src/App.jsx` | Split into `components/`, `hooks/`, `useGenerationFlow` |
 | Legacy free-form flow adds a second code path | `question.controller.js` | Delete or mark API-only |
 | Multer filter requires `.pdf` extension AND PDF MIME — some browsers send `application/octet-stream` | `upload.middleware.js` | Accept extension OR either PDF MIME |
+| README documents the old single-step flow; new env knobs undocumented | `README.md` | Refresh: two-step flow, `/kb` + `/analyze`, security knobs, call economics |
 | `console.log` for all server observability | throughout | Leveled logger (pino) with request IDs |
-| Ad-hoc scripts at root + `scripts/` | root | Consolidate and document |
-| README documents the old single-step flow | `README.md` | Refresh with two-step flow + `/kb`, `/analyze` endpoints |
+| Ad-hoc scripts at root + `scripts/` + `server/test-*.js` | repo | Consolidate and document |
 | Mixed response-wrapping conventions (some `{success,message,data}`, analyze/generate unwrapped) | routes | Document per-route contracts in one place |
+| No CI — lint + tests are local-only right now | `.github/` | GitHub Actions running root `npm test` on push/PR |
 
 ---
 
-## 9. Test Assessment
+## 9. Test & Lint Assessment
 
-| Suite | Result | Coverage focus |
+| Check | Result | Coverage |
 |---|---|---|
-| `server` (`node --test`) | ✅ **33/33** (~1 s) | blueprint contract, available-units, slot-unit-map validation, retrieval unit filtering, per-item assignment, notes & point IDs, unknown-marks validation behavior |
-| `client` (`node --test`) | ✅ 12/12 (~0.1 s) | `blueprintUnits` math (default assign, running totals, mixed/unassigned) |
+| `server` lint (`eslint .`) | ✅ 0 problems | no-undef, no-unused-vars, no-const-assign, no-redeclare (Node globals, ES modules) |
+| `client` lint (`eslint .`) | ✅ 0 problems | + react-hooks/rules-of-hooks (error), exhaustive-deps (warn, 0 findings) (browser globals, JSX) |
+| `server` tests (`node --test`) | ✅ **39/39** | blueprint contract, available-units, slot-unit-map validation, retrieval unit filtering, per-item assignment, notes & point IDs, unknown-marks behavior, **SSRF guard (6)** |
+| `client` tests (`node --test`) | ✅ **12/12** | `blueprintUnits` math (default assign, running totals, mixed/unassigned) |
 | `vite build` | ✅ passes | — |
 | E2E browser (`e2e-two-step.mjs`) | ✅ passes (manual) | full two-step flow with real PDFs, real Gemini, real Qdrant |
+| Wiring | `npm test` = **lint → node --test** in both workspaces; root `npm test` runs both workspaces; root `npm run lint` available | |
 
-**Gaps:** agent-pipeline tests (stubbed Gemini/Qdrant) · route/controller contract tests · no lint layer · E2E scripts not wired into npm scripts/CI.
+**Gaps:** agent-pipeline tests (stubbed Gemini/Qdrant) · route/controller contract tests (429/422/SSRF live behaviors are verified manually but not in CI) · E2E not wired into npm scripts/CI.
 
 ---
 
@@ -236,23 +263,35 @@ Zero automated coverage for the agent pipeline (orchestrator, generator, validat
 
 | Priority | Action | Effort | Impact |
 |---|---|---|---|
-| 🔴 P0 | Fix Qdrant URL default (S1) + enforce CORS_ORIGIN (S2); rotate leaked credentials | 30 min | Security hygiene |
-| 🔴 P0 | Rate limiting on generate/ingest endpoints (S3) | 2–3 h | Protects paid API spend |
-| 🟠 P1 | Add ESLint (`no-undef`, react-hooks) to both workspaces, wire into `npm test` | 1–2 h | Prevents the C1 class of bugs permanently |
-| 🟠 P1 | Agent-pipeline tests with stubbed Gemini/Qdrant; route contract tests | 1 day | Protects the most complex logic |
-| 🟠 P1 | SSRF guard on `fileUrl` endpoints (S4) | 1–2 h | Server safety |
+| 🟠 P1 | GitHub Actions CI: run root `npm test` (lint + both suites) on push/PR | 1 h | The lint gate only protects the repo if it runs somewhere other than your machine |
+| 🟠 P1 | Update README (two-step flow, `/kb` + `/analyze`, security env knobs, deployment checklist) | 1 h | Docs are now the weakest link |
+| 🟠 P1 | Auth on the AI-tier endpoints (API key minimum) before any public deploy | 0.5–1 day | Identity + spend attribution beyond IP buckets |
+| 🟡 P2 | Agent-pipeline tests with stubbed Gemini/Qdrant; route contract tests (429/422/SSRF) | 1 day | Protects the most complex logic |
 | 🟡 P2 | Split App.jsx into components/hooks; retire legacy client path | 0.5–1 day | Maintainability |
-| 🟡 P2 | Update README (two-step flow, `/kb` + `/analyze`, in-memory store caveat, call economics) | 1 h | Accuracy |
 | 🟡 P2 | Multer MIME filter relax; wire `e2e-two-step.mjs` into npm scripts | 1 h | Robustness / regression safety |
-| 🟢 P3 | Leveled logger, `helmet`, consolidate root scripts | 2–3 h | Operational polish |
+| 🟢 P3 | Leveled logger (pino), consolidate root scripts | 2–3 h | Operational polish |
 | 🟢 P3 | Optional: allow MATCH columns to draw from past-paper context pool (would have saved Q3) | 1 h + policy review | Generation yield |
+| 🟢 P3 | Qdrant cluster rotation (defense-in-depth; leak already purged from remote) | 30 min | Closes the SHA-cache caveat entirely |
+
+**No P0 items remain.** The original "one focused day from broken demo to working product" milestone is complete.
 
 ---
 
-## 11. Bottom Line
+## 11. Deployment Checklist (operator, outside the code)
 
-This is now a **coherent, working end-to-end product**: upload a previous-year paper → get a locked blueprint → review it, upload syllabus notes as units, assign every question to a unit → generate with live per-slot progress → download a paper whose structure mirrors the original and whose content is grounded in your notes.
+1. **Set `CORS_ORIGIN` explicitly** for any non-local deploy (e.g. `https://yourapp.com`) — the code default only covers localhost origins.
+2. **Set `QDRANT_URL` + `QDRANT_API_KEY` explicitly** in the deployed environment — there is no cloud fallback default anymore; unset means `http://localhost:6333`.
+3. **Confirm `CLOUDINARY_CLOUD_NAME` is set** wherever `fileUrl` endpoints are used — with it set, only your cloud's URLs are fetchable; without it, fileUrl downloads are refused (fail closed).
+4. **Behind a reverse proxy:** set `app.set('trust proxy', 1)` so rate-limit buckets key on real client IPs.
+5. **Tune rate limits if needed:** `RATE_LIMIT_AI_PER_MINUTE` (default 6 — deliberately tight), `RATE_LIMIT_DEFAULT_PER_MINUTE` (default 120).
+6. Optional: rotate the Qdrant cluster; add auth before going multi-user.
 
-The LangGraph pipeline's cost/latency engineering (4 AI calls per 5 questions), the deterministic blueprint system, and the dual-corpus RAG design are production-thoughtful, and the quality gates demonstrably work (they caught out-of-grounding content in Q3 rather than shipping it silently).
+---
 
-**The next focus should be security hardening (P0) and pipeline test coverage (P1)** — both small relative to the value they protect.
+## 12. Bottom Line
+
+This is now a **coherent, working, security-conscious product**: upload a previous-year paper → get a locked blueprint → review it, upload syllabus notes as units, assign every question to a unit → generate with live per-slot progress → download a paper whose structure mirrors the original and whose content is grounded in your notes.
+
+The engineering fundamentals are solid on every axis that was audited: the LangGraph pipeline's cost/latency engineering (4 AI calls per 5 questions), deterministic blueprint system, dual-corpus RAG, quality gates that demonstrably refuse out-of-grounding content, a hardened HTTP surface, and a lint gate that makes the white-screen bug class un-committable.
+
+**Next: CI + README (P1), then auth and pipeline tests** — each is small relative to the value it protects.

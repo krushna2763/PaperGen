@@ -171,7 +171,7 @@ export function classifyQuestionType(stem, marksPerItem = null, totalMarks = nul
  * coarse deterministic tag so generation/validation can reason about the
  * pattern ("choose-correct-option", "fill-in-blank", …).
  */
-function classifyInstruction(instruction, type) {
+export function classifyInstruction(instruction, type) {
   const s = String(instruction || '').toLowerCase();
   if (/(?:read the (?:given )?(?:passage|following)|comprehension|reference to the context|based on the (?:given )?passage)/.test(s)) return 'passage-comprehension';
   if (/match (?:the )?(?:following|column|columns|items)/.test(s)) return 'match-columns';
@@ -210,7 +210,7 @@ function classifyInstruction(instruction, type) {
 }
 
 /** Expected ANSWER FORM per question type (what a correct response looks like). */
-function classifyAnswerForm(type) {
+export function classifyAnswerForm(type) {
   const map = {
     MCQ: 'single-correct-option',
     TRUE_FALSE: 'true-false-statement',
@@ -609,4 +609,4 @@ export function extractBlueprint({ questions = [], text = '' } = {}) {
   };
 }
 
-export default { extractBlueprint, classifyQuestionType };
+export default { extractBlueprint, classifyQuestionType, classifyInstruction, classifyAnswerForm };
