@@ -17,7 +17,8 @@
  * surfaced in `blueprintWarnings` — never invented.
  */
 
-import { normalizeBlueprintType } from './blueprint-schema.js';
+import { normalizeBlueprintType, deriveQuestionType, answerFormForType } from './blueprint-schema.js';
+import { cleanAcademicSemanticText } from '../document/academic-text-cleaner.js';
 import { parseMarksExpression, stripMarksExpression, parseOptionalRule } from './blueprint-normalizer.js';
 import { detectOptionLabelStyle } from './template-analyzer.js';
 
@@ -104,6 +105,7 @@ function extractStudentInstructions(text) {
 // ─── Question-type classification (priority ordered) ─────────────────────────
 
 const TYPE_PATTERNS = [
+  { type: 'IMAGE_BASED', re: /(?:look at|study|observe|identify the (?:object|picture|diagram)|refer to)\s+(?:the\s+)?(?:picture|image|diagram|figure|illustration|given picture|(?:following|above|below)\s+(?:image|picture|diagram|figure|map)|following(?:\s+\w+){0,2}?\s*(?:image|picture|diagram|figure))/i },
   { type: 'MAP', re: /\bmap\b|mark the following|locate(?: and label)? on|point out on/i },
   { type: 'DIAGRAM', re: /draw a (?:labelled|labeled|neat)?\s*diagram|label the (?:given )?(?:diagram|figure)|diagram of/i },
   { type: 'DRAWING', re: /^draw\b|draw and label|draw the\b/i },
@@ -173,6 +175,7 @@ export function classifyQuestionType(stem, marksPerItem = null, totalMarks = nul
  */
 export function classifyInstruction(instruction, type) {
   const s = String(instruction || '').toLowerCase();
+  if (/(?:look at|study|observe|identify the (?:object|picture|diagram)|refer to)\s+(?:the\s+)?(?:picture|image|diagram|figure|illustration|given picture|(?:following|above|below)\s+(?:image|picture|diagram|figure|map)|following(?:\s+\w+){0,2}?\s*(?:image|picture|diagram|figure))/.test(s)) return 'observe-image-answer';
   if (/(?:read the (?:given )?(?:passage|following)|comprehension|reference to the context|based on the (?:given )?passage)/.test(s)) return 'passage-comprehension';
   if (/match (?:the )?(?:following|column|columns|items)/.test(s)) return 'match-columns';
   if (/(?:true or false|true\/false|state whether)/.test(s)) return 'true-false';
@@ -189,6 +192,7 @@ export function classifyInstruction(instruction, type) {
   if (/(?:write a|compose|create a story)/.test(s)) return 'creative-writing';
   if (/(?:solve|calculate|find the|evaluate)/.test(s)) return 'numerical';
   const fallback = {
+    IMAGE_BASED: 'observe-image-answer',
     MCQ: 'choose-correct-option',
     TRUE_FALSE: 'true-false',
     FILL_IN_THE_BLANK: 'fill-in-blank',
@@ -212,6 +216,7 @@ export function classifyInstruction(instruction, type) {
 /** Expected ANSWER FORM per question type (what a correct response looks like). */
 export function classifyAnswerForm(type) {
   const map = {
+    IMAGE_BASED: 'image-based-response',
     MCQ: 'single-correct-option',
     TRUE_FALSE: 'true-false-statement',
     FILL_IN_THE_BLANK: 'word-or-phrase',
@@ -238,15 +243,70 @@ export function classifyAnswerForm(type) {
 }
 
 /**
+ * Deterministic COGNITIVE-OPERATION tag (coarse Bloom-style level). Derived
+ * ONLY from the classified construction pattern / question type — never from
+ * the content itself, which extraction cannot judge. Unknown stays null.
+ * @param {string|null} instructionType - pattern.instructionType tag
+ * @param {string} type - canonical blueprint type
+ * @returns {string|null} recall | identify | explain | analyze | apply | create | null
+ */
+export function classifyCognitiveOperation(instructionType, type) {
+  const byInstruction = {
+    'observe-image-answer': 'identify',
+    'choose-correct-option': 'identify',
+    'true-false': 'recall',
+    'fill-in-blank': 'recall',
+    'match-columns': 'recall',
+    'name-the-following': 'recall',
+    'define-terms': 'recall',
+    'map-pointing': 'identify',
+    'answer-following': 'explain',
+    'explain-reason': 'explain',
+    'passage-comprehension': 'explain',
+    'differentiate': 'analyze',
+    'compare': 'analyze',
+    'numerical': 'apply',
+    'draw-label': 'apply',
+    'creative-writing': 'create',
+  };
+  if (instructionType && byInstruction[instructionType]) return byInstruction[instructionType];
+  const byType = {
+    IMAGE_BASED: 'identify',
+    MCQ: 'identify',
+    TRUE_FALSE: 'recall',
+    FILL_IN_THE_BLANK: 'recall',
+    MATCH_THE_FOLLOWING: 'recall',
+    DEFINITION: 'recall',
+    MAP: 'identify',
+    NUMERICAL: 'apply',
+    DIAGRAM: 'apply',
+    DRAWING: 'apply',
+    DIFFERENTIATE: 'analyze',
+    COMPARE: 'analyze',
+    PASSAGE: 'explain',
+    COMPREHENSION: 'explain',
+    CASE_BASED: 'apply',
+    CREATIVE_WRITING: 'create',
+    LETTER: 'create',
+    NOTICE: 'create',
+    ESSAY: 'create',
+  };
+  return byType[type] ?? null;
+}
+
+/**
  * Build the deterministic QUESTION PATTERN for one main question from its
  * observed items: construction/answer-form tags, per-item option counts and
  * the detected MCQ option-label style.
  */
 function buildQuestionPattern(main, type, instruction, observedSubParts) {
   const rawItems = observedSubParts.length > 0 ? observedSubParts : (main.question ? [main.question] : []);
+  // Per-item option counts stay POSITIONAL (0 = item recovered no options), so
+  // per-item option expectations align with the item order even in MIXED slots
+  // (e.g. "Fill in the blanks and choose the correct answer": items a/b are
+  // fill-blank items with 0 options, items c/d are MCQs with 3 each).
   const optionCounts = rawItems
-    .map((it) => (Array.isArray(it?.options) && it.options.length > 0 ? it.options.length : 0))
-    .filter((n) => n > 0);
+    .map((it) => (Array.isArray(it?.options) && it.options.length > 0 ? it.options.length : 0));
   const optionSamples = [];
   for (const it of rawItems) {
     for (const o of Array.isArray(it?.options) ? it.options : []) {
@@ -261,14 +321,23 @@ function buildQuestionPattern(main, type, instruction, observedSubParts) {
     answerForm: classifyAnswerForm(type),
     layout: observedSubParts.length > 0 ? 'grouped-sub-items' : 'single-item',
     optionCounts, // per-item option counts observed in the reference (MCQ)
-    maxOptionCount: optionCounts.length > 0 ? Math.max(...optionCounts) : null,
+    maxOptionCount: optionCounts.length > 0 && Math.max(...optionCounts) > 0 ? Math.max(...optionCounts) : null,
     optionLabelStyle: optionSamples.length > 0 ? optionStyle : null,
   };
 }
 
-/** Clean an observed reference item for topic anchoring (never copied verbatim). */
-function cleanReferenceItem(text, maxLen = 160) {
-  const t = String(text || '').replace(/\s+/g, ' ').trim();
+/**
+ * Clean an observed reference item for topic anchoring (never copied
+ * verbatim). Runs the generic OCR-diagram-noise cleaner (never touches
+ * legitimate vocabulary, never hardcodes subject terms — see
+ * document/academic-text-cleaner.js) before the existing whitespace/length
+ * normalization, so a page whose image bled OCR glyphs into the adjacent
+ * question text no longer pollutes the topic anchor shown to the planner and
+ * generator.
+ */
+export function cleanReferenceItem(text, maxLen = 160) {
+  const semantic = cleanAcademicSemanticText(text);
+  const t = String(semantic || '').replace(/\s+/g, ' ').trim();
   if (!t) return null;
   return t.length > maxLen ? `${t.slice(0, maxLen)}…` : t;
 }
@@ -362,10 +431,42 @@ function extractMainQuestion(main, warnings, index = 0) {
   const subMarksSum = subMarks.length > 0 ? subMarks.reduce((a, b) => a + b, 0) : null;
 
   const observedSubParts = main.subparts.length;
-  const itemCount = observedSubParts > 0 ? observedSubParts : (expression?.itemCount ?? 1);
-  const totalMarks = expression?.totalMarks ?? subMarksSum ?? null;
-  const marksPerItem = expression?.marksPerItem
-    ?? (totalMarks != null ? totalMarks / itemCount : null);
+  // DECLARED vs OBSERVED (never mixed):
+  //   itemCount / marks.itemCount = DECLARED count printed in the paper
+  //     (marks expression like "1x7=7" → 7). A printed declaration outranks
+  //     what extraction recovered — under-recovery must not shrink the locked
+  //     structure (Computer Class 3 Q3 regression: declared 7, recovered 5 →
+  //     the slot must stay a 7-item slot, with the shortfall diagnosed).
+  //   subQuestionCount            = OBSERVED count actually recovered below.
+  //   itemCount / marksPerItem get their INITIAL (positional-parse) values here;
+  //     the orientation-disambiguation verdict below (see there) may legally
+  //     correct them, so they are `let` and updated in exactly one place.
+  let itemCount = expression?.itemCount ?? (observedSubParts > 0 ? observedSubParts : 1);
+  // SINGLE-STEM MARKS FALLBACK: a question with no marks expression and no
+  // sub-parts can still carry its total as trailing bracketed marks recovered
+  // by the extractor ("Q5. Write a letter … (4 Marks)"). Prefer the printed
+  // expression, then the sub-part sum, then the stem's own parsed marks.
+  const stemMarks = Number(main.question?.marks);
+  const totalMarks = expression?.totalMarks
+    ?? subMarksSum
+    ?? (Number.isFinite(stemMarks) && stemMarks > 0 ? stemMarks : null);
+  // PER-ITEM VALUE NEVER INVENTED BY DIVISION — but only where the paper
+  // PROVES non-uniformity: when EVERY observed sub-part carries its OWN
+  // printed mark (the bracketed per-sub marks-column style) and those marks
+  // DIFFER ("[03] … [02]"), total/itemCount would fabricate a value no
+  // sub-question prints (2.5) — perItem stays null; the real values live on
+  // items[].marks. Uniform printed marks read their printed value directly;
+  // the legacy division fallback (unmarked subs, e.g. 4 items × 4 marks → 1
+  // each, English Unit 3 contract) keeps working wherever the paper prints
+  // no per-sub evidence either way.
+  const allSubsMarked = observedSubParts > 0 && subMarks.length === observedSubParts;
+  const uniformSubMarks = allSubsMarked && subMarks.every((m) => Math.abs(m - subMarks[0]) < 1e-6);
+  const provenNonUniform = allSubsMarked && !uniformSubMarks;
+  let marksPerItem;
+  if (expression?.marksPerItem != null) marksPerItem = expression.marksPerItem;
+  else if (uniformSubMarks) marksPerItem = subMarks[0];
+  else if (provenNonUniform) marksPerItem = null;
+  else marksPerItem = totalMarks != null ? totalMarks / itemCount : null;
 
   // INTERNAL_CHOICE: "A. … OR B. …" — two or three captured options plus a
   // standalone "OR" in the stem is a choice question, not an MCQ. Excludes
@@ -417,6 +518,10 @@ function extractMainQuestion(main, warnings, index = 0) {
     if (clean) referenceItems.push(clean);
   }
   const pattern = buildQuestionPattern(main, type, instruction, subparts);
+  // COGNITIVE OPERATION (deterministic, coarse): derived ONLY from the
+  // classified construction pattern / question type. Extraction cannot read
+  // cognitive intent that the paper does not state — unknown stays null.
+  const cognitiveOperation = classifyCognitiveOperation(pattern?.instructionType, type);
 
   // CANONICAL PER-ITEM SPEC: one structured object per reference sub-question,
   // carrying its own label, marks, topic anchor text and observed option count.
@@ -440,9 +545,112 @@ function extractMainQuestion(main, warnings, index = 0) {
     const parsedMark = Number(sp?.marks);
     const mark = Number.isFinite(parsedMark) && parsedMark > 0 ? Math.round(parsedMark * 10) / 10 : null;
     const oc = Array.isArray(sp?.options) && sp.options.length > 0 ? sp.options.length : null;
-    items.push({ label: String.fromCharCode(97 + i), sourceLabel, referenceText: ref, marks: mark, optionCount: oc });
-    if (mark != null) itemMarks.push(mark);
+    // PER-ITEM TYPE — a mixed slot ("Fill in the blanks AND choose the correct
+    // answer") holds fill-blank items beside MCQ items; the single slot `type`
+    // cannot express that, so every item carries its own deterministic type.
+    // Priority: a recovered option list is decisive (MCQ) → else the item's own
+    // stem text → else the extractor's own per-item label. Left null only when
+    // nothing is decisive — never invented.
+    let itemType = oc != null && oc >= 2 ? 'MCQ' : null;
+    if (!itemType) {
+      const byText = classifyQuestionType(String(sp?.text || ''), marksPerItem, totalMarks);
+      itemType = byText !== 'UNKNOWN' ? byText : (normalizeBlueprintType(sp?.type) || null);
+      if (itemType === 'UNKNOWN') itemType = null;
+    }
+    items.push({
+      label: String.fromCharCode(97 + i),
+      sourceLabel,
+      referenceText: ref,
+      // `topicAnchor` is the alias the analyzer/generator/validator read as the
+      // per-item topic; keep `referenceText` too for backward compatibility.
+      topicAnchor: ref,
+      // Provenance/debugging only — the untouched OCR'd text before the
+      // generic academic-text cleaner ran. Never read for semantic analysis.
+      rawReferenceText: String(sp?.text ?? '').trim() || null,
+      type: itemType,
+      answerForm: itemType ? answerFormForType(itemType, oc) : null,
+      marks: mark,
+      optionCount: oc,
+      recovered: true,
+    });
   });
+
+  // DETERMINISTIC PER-ITEM MARK FALLBACK (item-count-verified only): when the
+  // reference states marks ONCE as "N×M=Total" instead of repeating one beside
+  // every item, an item's own mark is never separately recoverable — but a
+  // per-item value IS already known from that expression for every item it
+  // declares. This is not "distributing an ambiguous total" (the comment above
+  // warns against that): it is reading a value the expression already states.
+  //
+  // Real documents are not consistent about which of the two printed numbers
+  // is the item count and which is the per-item mark ("1x3=3" in one paper,
+  // "3X1=3" in another, both meaning "3 items, 1 mark each") — parseMarksExpression
+  // always assigns the first number to marksPerItem/the second to itemCount,
+  // unchanged; that assignment is used everywhere else in this codebase and is
+  // NOT changed here. This fallback only disambiguates, LOCALLY, which of the
+  // two already-parsed numbers is the real per-item mark, by checking which one
+  // equals the ACTUAL extracted item count — the only number extraction can
+  // verify against reality. When NEITHER number matches (the declared count
+  // disagrees with what was actually recovered), nothing is guessed: no item
+  // is invented, no mark is assigned, and a warning is raised instead.
+  // ORIENTATION DISAMBIGUATION RESULT — computed once, applied to BOTH layers:
+  //   • items[].marks  (each sub-part's per-item mark), and
+  //   • the slot's top-level itemCount / marksPerItem (the DECLARED-structure
+  //     fields the structural validator and the generator prompts read).
+  // When the observed sub-part count proves the positional parse was
+  // orientation-swapped ("3X1=3" parsed as 1 item × 3 marks when the paper
+  // plainly recovered 3 items × 1 mark), keeping the top-level fields
+  // un-disambiguated makes the slot contract SELF-CONTRADICTORY: itemCount: 1
+  // beside items[] = 3 × [1 mark]. A candidate then producing the CORRECT 3
+  // items fails the structural check ("requires 1 item(s)") while one
+  // producing the WRONG 1 item passes — backwards on both sides. The verdict
+  // is already verified against extraction reality here, so it is authoritative
+  // for the whole contract. Under-recovery (declared 7, observed 5) does NOT
+  // touch this: the observed count matches NEITHER declared number, so the
+  // declared structure stays locked (Computer Class 3 Q3 regression).
+  // (itemCount / marksPerItem were declared with the positional-parse values
+  // above; this is the ONE place the disambiguation verdict corrects them)
+  if (expression != null && observedSubParts > 0) {
+    let effectivePerItem = null;
+    if (expression.itemCount === observedSubParts) {
+      effectivePerItem = expression.marksPerItem;
+    } else if (expression.marksPerItem === observedSubParts) {
+      // Orientation was swapped: the declared structure follows the same verdict.
+      effectivePerItem = expression.itemCount;
+      itemCount = observedSubParts;
+      marksPerItem = effectivePerItem;
+    }
+    if (effectivePerItem != null) {
+      const rounded = Math.round(effectivePerItem * 10) / 10;
+      for (const it of items) {
+        if (it.marks == null) it.marks = rounded;
+      }
+    } else {
+      warnings.push({
+        field: 'itemCount',
+        label: main.number,
+        warning: `Reference expression "${expression.expression}" declares ${expression.itemCount} item(s) but ${observedSubParts} item(s) were actually extracted for "${(cleaned || rawText).slice(0, 60)}" — per-item marks could not be deterministically assigned; route to teacher review.`,
+      });
+    }
+  }
+  itemMarks.length = 0;
+  for (const it of items) if (it.marks != null) itemMarks.push(it.marks);
+  itemCount = Math.round(itemCount);
+  if (marksPerItem != null) marksPerItem = Math.round(marksPerItem * 10) / 10;
+
+  // PARENT TYPE from the item types (THE canonical rule — shared with the
+  // normalizer via deriveQuestionType so the two never disagree):
+  //   all item types equal  → keep that type
+  //   item types differ     → MIXED
+  //   items give no signal  → keep the stem-based `type` decided above
+  if (observedSubParts > 0) {
+    const derived = deriveQuestionType(items.map((it) => it.type));
+    if (derived === 'MIXED') {
+      type = 'MIXED';
+    } else if (derived && (type === 'UNKNOWN' || type == null)) {
+      type = derived;
+    }
+  }
 
   // itemsIndependent: false only when the sub-parts share a stimulus
   // (passage / case-based / comprehension). Always a boolean, never null.
@@ -466,6 +674,20 @@ function extractMainQuestion(main, warnings, index = 0) {
     });
   }
 
+  // MARKS EXPRESSION — keep the printed one verbatim; otherwise synthesize the
+  // canonical "PxN=M" only when the numbers are fully known and consistent
+  // (uniform per-item marks). Never invents a value: perItem, itemCount and
+  // total must all be known and multiply out exactly.
+  const roundedPerItem = marksPerItem != null ? Math.round(marksPerItem * 10) / 10 : null;
+  const itemCountForExpr = itemCount;
+  const synthExpression =
+    expression?.expression
+    ?? (roundedPerItem != null && itemCountForExpr > 1 && totalMarks != null
+        && Math.abs(roundedPerItem * itemCountForExpr - totalMarks) < 1e-6
+        && Number.isInteger(roundedPerItem)
+      ? `${roundedPerItem}x${itemCountForExpr}=${totalMarks}`
+      : null);
+
   return {
     number: main.numeric,
     // label is the slotUnitMap key — ALWAYS present, positional fallback.
@@ -477,22 +699,22 @@ function extractMainQuestion(main, warnings, index = 0) {
     instruction,
     referenceItems,
     pattern,
+    // OBSERVED item count (what extraction actually recovered) — kept strictly
+    // separate from `itemCount`, which is the DECLARED count from the paper.
+    subQuestionCount: observedSubParts,
+    cognitiveOperation,
     marks: {
-      perItem: marksPerItem != null ? Math.round(marksPerItem * 10) / 10 : null,
+      perItem: roundedPerItem,
       itemCount,
       total: totalMarks,
-      expression: expression?.expression ?? null,
+      expression: synthExpression,
     },
     itemCount,
     marksPerItem,
     totalMarks,
-    markExpression: expression?.expression ?? null,
+    markExpression: synthExpression,
     optionalRule,
-    subQuestionCount: observedSubParts,
     optionCount: optionCount > 0 ? optionCount : null,
-    // Canonical per-item reference specification (label → marks → topic anchor
-    // → observed option count). Grouped questions carry one entry per part;
-    // single-stem questions keep an empty array (no per-item data to invent).
     items: observedSubParts > 0 ? items : [],
     itemMarks: observedSubParts > 0 ? itemMarks : [],
     section: main.question?.section ?? null,

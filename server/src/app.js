@@ -8,6 +8,8 @@ import paperRoutes from './routes/paper.routes.js';
 import questionRoutes from './routes/question.routes.js';
 import kbRoutes from './routes/kb.routes.js';
 import templateRoutes from './routes/template.routes.js';
+import schoolTemplateRoutes from './routes/school-template.routes.js';
+import libraryRoutes from './routes/paper-archive.routes.js';
 
 const app = express();
 
@@ -20,7 +22,8 @@ app.use(cors({ origin: env.CORS_ORIGIN }));
 // Security headers (CSP left off: this is a JSON API, not a served page)
 app.use(helmet({ contentSecurityPolicy: false }));
 
-// 10mb JSON limit: /papers/index-questions receives 3072-d embedding vectors in the body,
+// 10mb JSON limit: /papers/index-questions receives full embedding vectors in the
+// body (2048-d on the OpenRouter nemotron embed model, 3072-d on legacy Gemini),
 // which far exceeds the express.json() 100kb default
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -37,6 +40,8 @@ app.use('/api', healthRoutes);
 app.use('/api/papers', paperRoutes);
 app.use('/api/kb', kbRoutes);
 app.use('/api/templates', templateRoutes);
+app.use('/api/school-templates', schoolTemplateRoutes);
+app.use('/api/library', libraryRoutes);
 app.use('/api', questionRoutes);
 
 // Root route

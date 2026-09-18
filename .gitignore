@@ -1,37 +1,100 @@
-# Dependencies
+# Dependencies & Build output
 node_modules/
 .pnp
 .pnp.js
-
-# Environment variables
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-
-# Build output
 dist/
 build/
 
+# Environment & secrets
+.env
+.env.*
+*.env
+*.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Uploaded papers / documents
+uploads/*
+!uploads/.gitkeep
+uploads/
+**/uploads/
+
+# Generated papers & answer keys
+*.pdf
+*.docx
+*.doc
+artifacts/
+generated/
+output/
+
+# Test papers / extracted paper data
+*_analyze*.json
+*_extract*.json
+*analyze*.json
+*extract*.json
+
+# E2E test data
+e2e-*.mjs
+e2e-*.js
+e2e-*.json
+e2e-screenshots/
+
+# Temporary test/probe scripts
+scripts/*.mjs
+!scripts/gen-font-module.mjs
+scripts/*.js
+scripts/phase*/
+scripts/_*
+scripts/test-*
+scripts/probe-*
+scripts/forensic-*
+
+# Temporary JSON / test outputs
+slot-*.json
+upload-*.json
+extract-*.json
+analyze-*.json
+server/upload*.json
+server/analyze*.json
+server/scratch*
+fileurl-*.txt
+fix-*.js
+
 # Logs
+*.log
+*.err
+logs/
+server-run.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-logs/
-*.log
+ingestion/**/*.log
+ingestion/**/*.err
+ingestion/**/pip-install*
+ingestion/**/startup*
+ingestion/**/worker-*
 
-# Uploads and temporary files
-uploads/*
-!uploads/.gitkeep
+# Runtime/local database
+server/data/
+
+# Python / OCR temporary files
+__pycache__/
+**/__pycache__/
+**/.venv/
+**/venv/
+ingestion/**/.env
+
+# Temporary directories
 temp/
 tmp/
+scratch/
 
 # OS & Editor files
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
-
-# E2E test artifacts (regenerated; not source)
-e2e-screenshots/
+.gemini/
+.agents/

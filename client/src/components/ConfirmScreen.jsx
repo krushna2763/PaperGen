@@ -1,19 +1,17 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
   slotKey,
   anyText,
   marksText,
+  marksSummaryOf,
   itemLabels,
   itemMarksOf,
   isExpandable,
   isApproximate,
   lockReason,
   isMixed,
-  defaultAssign,
-  buildSlotUnitMap,
-  runningTotals,
-  unassignedList,
 } from './blueprintUnits.js';
+import { useUnitAssignment } from './useUnitAssignment.js';
 
 /* ─────────────────────────────────────────────────────────────
    Confirm screen — blueprint review + per-question unit assignment.
@@ -97,70 +95,21 @@ export default function ConfirmScreen({
 }) {
   const fromReference = source !== 'manual';
   const questions = blueprint?.questions || [];
-  const coerceId = (raw) => {
-    const hit = units.find((u) => String(u.id) === String(raw));
-    return hit ? hit.id : null;
-  };
 
-  // Assignment state — re-seeded when a different blueprint arrives; edits
-  // within one blueprint (one jobId) are preserved.
-  const [assign, setAssign] = useState(() => defaultAssign(blueprint, units));
-  const [expanded, setExpanded] = useState(() => new Set());
-  const seededFor = useRef(null);
-  useEffect(() => {
-    const stamp = blueprint?.jobId || JSON.stringify(questions.map((q, i) => slotKey(q, i))) + '|' + units.map((u) => u.id).join(',');
-    if (seededFor.current === stamp) return;
-    seededFor.current = stamp;
-    // Mode B handoff: the builder's pre-assignments win when a row's unit is
-    // present in the unit list; everything else falls back to the default.
-    setAssign((prev) => {
-      const base = defaultAssign(blueprint, units);
-      if (prev && Object.keys(prev).length > 0 && initialAssign == null) return prev;
-      if (initialAssign == null) return base;
-      const merged = { ...base };
-      for (const [k, v] of Object.entries(initialAssign)) {
-        if (v?.unit != null && merged[k]) merged[k] = { ...merged[k], unit: v.unit, items: {} };
-      }
-      return merged;
-    });
-    setExpanded(new Set());
-  }, [blueprint, units]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const setQ = (key, updater) =>
-    setAssign((m) => ({ ...m, [key]: updater(m[key] || { unit: null, items: {} }) }));
-
-  const seedItems = (q, unit) => Object.fromEntries(itemLabels(q).map((l) => [l, unit ?? null]));
-
-  const assignWholeQuestion = (q, key, rawVal) => {
-    const v = rawVal === '' ? null : coerceId(rawVal);
-    setQ(key, () => ({ unit: v, items: expanded.has(key) ? seedItems(q, v) : {} }));
-  };
-
-  const assignItem = (q, key, label, rawVal) => {
-    const v = rawVal === '' ? null : coerceId(rawVal);
-    setQ(key, (a) => {
-      const items = { ...seedItems(q, a.unit), ...a.items, [label]: v };
-      const vals = itemLabels(q).map((l) => items[l]);
-      const uniform = vals.every((x) => x != null) && new Set(vals).size === 1;
-      return { unit: uniform ? vals[0] : a.unit, items };
-    });
-  };
-
-  const toggleExpand = (q, key) => {
-    setExpanded((s) => {
-      const n = new Set(s);
-      n.has(key) ? n.delete(key) : n.add(key);
-      return n;
-    });
-    setQ(key, (a) => (Object.keys(a.items).length ? a : { ...a, items: seedItems(q, a.unit) }));
-  };
-
-  const { totals, unassigned, unknownItems, approximate } = useMemo(
-    () => runningTotals(blueprint, assign, units),
-    [blueprint, assign, units]
-  );
-  const unassignedKeys = useMemo(() => unassignedList(blueprint, assign), [blueprint, assign]);
-  const maxBar = Math.max(1, unassigned, ...Object.values(totals));
+  const {
+    assign,
+    expanded,
+    assignWholeQuestion,
+    assignItem,
+    toggleExpand,
+    totals,
+    unassigned,
+    unknownItems,
+    approximate,
+    maxBar,
+    unassignedKeys,
+    buildMap,
+  } = useUnitAssignment(blueprint, units, initialAssign);
   const warnings = useMemo(
     () =>
       (blueprint?.blueprintWarnings || [])
@@ -342,8 +291,8 @@ export default function ConfirmScreen({
                     {opt || ''}
                     {approx && <span className="ml-1 text-amber-500" title="Student answers only some items — per-unit split is approximate">≈</span>}
                   </span>
-                  <span className="w-16 shrink-0 text-[12px] text-gray-500">
-                    {marksText(q.totalMarks) || 'marks n/a'}
+                  <span className={`w-16 shrink-0 text-[12px] ${marksSummaryOf(q) ? 'text-gray-500' : 'text-amber-600'}`} title={marksSummaryOf(q) ? undefined : "The reference paper's printed marks for this question could not be read — nothing was invented."}>
+                    {marksSummaryOf(q) || 'Marks not detected from reference'}
                   </span>
 
                   <div className="ml-auto flex items-center gap-2">
@@ -430,7 +379,7 @@ export default function ConfirmScreen({
           <button
             type="button"
             disabled={!canGenerate}
-            onClick={() => onGenerate(buildSlotUnitMap(blueprint, assign))}
+            onClick={() => onGenerate(buildMap())}
             className="h-11 w-full rounded-lg bg-blue-700 text-sm font-semibold text-white transition-colors hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {busy ? 'Generating…' : 'Generate Question Paper'}

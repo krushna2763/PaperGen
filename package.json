@@ -16,6 +16,8 @@
     "install:all": "npm install && npm install --workspace=server && npm install --workspace=client"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2"
+    "concurrently": "^9.1.2",
+    "puppeteer-core": "^25.10.0",
+    "ws": "^8.21.3"
   }
 }

@@ -14,7 +14,7 @@
  * generator/validator never re-derive or redesign the marks.
  */
 
-import { normalizeBlueprintType, NUMBER_WORDS } from './blueprint-schema.js';
+import { normalizeBlueprintType, deriveQuestionType, answerFormForType, NUMBER_WORDS } from './blueprint-schema.js';
 
 /**
  * Parse an exam-style marks expression found inside a question text.
@@ -133,12 +133,38 @@ export function normalizeBlueprint(raw) {
     .map((q, i) => {
       const totalMarks = Number.isFinite(Number(q?.totalMarks)) && Number(q.totalMarks) > 0 ? Number(q.totalMarks) : null;
       const itemCount = Number.isFinite(Number(q?.itemCount)) && Number(q.itemCount) > 0 ? Math.round(Number(q.itemCount)) : 1;
+      // marksPerItem is NEVER re-derived by dividing the total when the
+      // observed items PROVE a non-uniform split (their own printed marks all
+      // exist and differ, e.g. "[03] … [02]"): the extractor already left
+      // perItem null for that case, and re-dividing (5/2 = 2.5) would
+      // fabricate a value no sub-question prints. The legacy division
+      // fallback (no per-item marks at all, e.g. 4 items × 4 marks → 1 each)
+      // keeps working unchanged.
+      const allItemsMarked = (Array.isArray(q?.items) ? q.items : []).length > 0
+        && (Array.isArray(q?.items) ? q.items : []).every((it) => Number.isFinite(Number(it?.marks)) && Number(it.marks) > 0);
+      const distinctItemMarks = [...new Set((Array.isArray(q?.items) ? q.items : [])
+        .map((it) => Number(it?.marks))
+        .filter((n) => Number.isFinite(n) && n > 0))];
+      const provenNonUniform = allItemsMarked && distinctItemMarks.length > 1;
       const marksPerItem = Number.isFinite(Number(q?.marksPerItem)) && Number(q.marksPerItem) > 0
         ? Number(q.marksPerItem)
-        : totalMarks != null ? totalMarks / itemCount : null;
+        : (totalMarks != null && !provenNonUniform ? totalMarks / itemCount : null);
       const stem = String(q?.stem ?? '').trim();
       const label = String(q?.label ?? `Q${i + 1}`).trim() || `Q${i + 1}`;
-      const bpType = normalizeBlueprintType(q?.type);
+      // PARENT TYPE — re-derive from the item types using THE canonical rule so
+      // a round-tripped or manually-built blueprint whose items disagree gets
+      // corrected to MIXED (or to the single item type). A slot whose stated
+      // type already survives and whose items give no signal keeps its stated
+      // type. deriveQuestionType ignores null/UNKNOWN item types.
+      const declaredType = normalizeBlueprintType(q?.type);
+      const itemTypeHint = deriveQuestionType(
+        (Array.isArray(q?.items) ? q.items : []).map((it) => it?.type),
+      );
+      const bpType = itemTypeHint === 'MIXED'
+        ? 'MIXED'
+        : (declaredType && declaredType !== 'UNKNOWN'
+            ? declaredType
+            : (itemTypeHint || 'UNKNOWN'));
       // Per-slot difficulty — ADDITIVE contract field shared by both paths.
       // Mode B (manual builder) sets it per question; extracted (Mode A) slots
       // never set it, so the generator falls back to the paper-level value.
@@ -171,7 +197,13 @@ export function normalizeBlueprint(raw) {
         stem,
         instruction: String(q?.instruction ?? q?.stem ?? '').trim(),
         marks: {
-          perItem: Number.isFinite(Number(q?.marks?.perItem)) ? Number(q.marks.perItem) : marksPerItem,
+          // NOTE: Number(null) === 0 — a null perItem (the extractor's honest
+          // "non-uniform split, never derived" verdict) must stay null, never
+          // collapse to 0 (which a consumer would read as a real zero-mark
+          // item). Only a genuinely finite, non-null value passes through.
+          perItem: (q?.marks?.perItem != null && Number.isFinite(Number(q.marks.perItem)))
+            ? Number(q.marks.perItem)
+            : marksPerItem,
           itemCount,
           total: totalMarks,
           expression: String(q?.marks?.expression ?? q?.markExpression ?? '').trim() || null,
@@ -182,6 +214,10 @@ export function normalizeBlueprint(raw) {
         markExpression: String(q?.markExpression ?? q?.marks?.expression ?? '').trim() || null,
         optionalRule: normalizeOptionalRule(q?.optionalRule),
         subQuestionCount: Number.isFinite(Number(q?.subQuestionCount)) ? Math.round(Number(q.subQuestionCount)) : 0,
+        // ADDITIVE (Phase 1): deterministic cognitive-operation tag from the
+        // reference instruction (recall/identify/explain/analyze/apply/create
+        // — or null when extraction could not support one).
+        cognitiveOperation: String(q?.cognitiveOperation ?? '').trim() || null,
         optionCount: Number.isFinite(Number(q?.optionCount)) ? Math.round(Number(q.optionCount)) : null,
         section: q?.section != null ? String(q.section) : null,
         sectionName: sectionNameByLabel.get(label) ?? null,
@@ -193,8 +229,12 @@ export function normalizeBlueprint(raw) {
               instructionType: String(q.pattern.instructionType ?? '').trim() || null,
               answerForm: String(q.pattern.answerForm ?? '').trim() || null,
               layout: String(q.pattern.layout ?? '').trim() || null,
+              // POSITIONAL per-item option counts — zeros are KEPT so index i
+              // always corresponds to reference item i, including MIXED slots
+              // ("fill in the blanks and choose the correct answer": items
+              // a/b are blanks [0], items c/d are MCQs [3, 3]).
               optionCounts: Array.isArray(q.pattern.optionCounts)
-                ? q.pattern.optionCounts.map(Number).filter((n) => Number.isFinite(n) && n > 0).slice(0, 12)
+                ? q.pattern.optionCounts.map(Number).filter((n) => Number.isFinite(n) && n >= 0).slice(0, 12)
                 : [],
               maxOptionCount: Number.isFinite(Number(q.pattern.maxOptionCount)) && Number(q.pattern.maxOptionCount) > 0 ? Number(q.pattern.maxOptionCount) : null,
               optionLabelStyle: String(q.pattern.optionLabelStyle ?? '').trim() || null,
@@ -217,12 +257,32 @@ export function normalizeBlueprint(raw) {
                 const mark = Number(it?.marks);
                 const oc = Number(it?.optionCount);
                 const rawLabel = String(it?.label ?? '').trim();
+                // PER-ITEM TYPE is preserved verbatim (canonicalized), never
+                // collapsed back into the parent type — it is authoritative for
+                // a MIXED slot. Absent → null (a homogeneous slot's items do
+                // not need an explicit type).
+                const itType = it?.type != null && String(it.type).trim() !== ''
+                  ? normalizeBlueprintType(it.type)
+                  : null;
+                const ocCanon = Number.isFinite(oc) && oc > 0 ? Math.round(oc) : null;
+                const anchor = String(it?.topicAnchor ?? it?.referenceText ?? '').trim().slice(0, 220) || null;
                 return {
                   label: /^[a-z]$/.test(rawLabel) ? rawLabel : String.fromCharCode(97 + idx),
                   sourceLabel: it?.sourceLabel != null ? String(it.sourceLabel).trim() || null : (rawLabel || null),
                   referenceText: String(it?.referenceText ?? '').trim().slice(0, 220) || null,
+                  topicAnchor: anchor,
+                  type: itType && itType !== 'UNKNOWN' ? itType : null,
+                  answerForm: String(it?.answerForm ?? '').trim()
+                    || (itType && itType !== 'UNKNOWN' ? answerFormForType(itType, ocCanon) : null),
+                  construction: String(it?.construction ?? '').trim() || null,
                   marks: Number.isFinite(mark) && mark > 0 ? Math.round(mark * 10) / 10 : null,
-                  optionCount: Number.isFinite(oc) && oc > 0 ? Math.round(oc) : null,
+                  optionCount: ocCanon,
+                  // ADDITIVE (Phase 1): whether extraction actually recovered
+                  // this item's content. Padded placeholder slots (declared
+                  // > observed) carry recovered: false + referenceText null —
+                  // structural slots, never fabricated content. Absent flag
+                  // (e.g. Mode B manual items) defaults to true.
+                  recovered: it?.recovered !== false,
                 };
               })
           : [],
@@ -231,6 +291,21 @@ export function normalizeBlueprint(raw) {
           : (Array.isArray(q.items)
               ? q.items.map((it) => Number(it?.marks)).filter((n) => Number.isFinite(n) && n > 0)
               : []),
+        // Mode A image-based locking (PHASE 4) — additive passthrough only,
+        // never fabricated. Without this an IMAGE_BASED slot's real image
+        // bytes and lock metadata were silently dropped on every
+        // generate/regenerate call (this function runs before the blueprint
+        // ever reaches the question generator), degrading every "vision"
+        // request to text-only with nothing to signal the loss.
+        ...(Array.isArray(q?.imageAssets) && q.imageAssets.length > 0 ? { imageAssets: q.imageAssets, assetImages: q.imageAssets } : {}),
+        ...(q?.imageLayout && typeof q.imageLayout === 'object' ? { imageLayout: q.imageLayout } : {}),
+        ...(q?.isLocked === true ? { isLocked: true } : {}),
+        ...(q?.detectedUnit != null ? { detectedUnit: q.detectedUnit } : {}),
+        ...(q?.detectedUnitSource != null ? { detectedUnitSource: q.detectedUnitSource } : {}),
+        ...(q?.detectedTopic != null ? { detectedTopic: q.detectedTopic } : {}),
+        ...(q?.topicConfidence != null ? { topicConfidence: q.topicConfidence } : {}),
+        ...(q?.reviewRequired === true ? { reviewRequired: true } : {}),
+        ...(Array.isArray(q?.lockedFields) && q.lockedFields.length > 0 ? { lockedFields: q.lockedFields } : {}),
       };
     })
     .filter((q) => q.type !== 'UNKNOWN' || q.stem || q.totalMarks != null);

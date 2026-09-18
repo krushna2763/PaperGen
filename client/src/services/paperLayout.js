@@ -30,9 +30,13 @@ import {
 import { slotKey } from '../components/blueprintUnits.js';
 
 /** Preferred order only used as a last-resort tiebreak (never to create sections). */
-const TYPE_ORDER = ['MCQ', 'SHORT_ANSWER', 'LONG_ANSWER', 'TRUE_FALSE', 'FILL_IN_THE_BLANK'];
+const TYPE_ORDER = ['MCQ', 'SHORT_ANSWER', 'LONG_ANSWER', 'TRUE_FALSE', 'FILL_IN_THE_BLANK', 'MIXED', 'IMAGE_BASED'];
 
-/** Normalize a raw type value into the internal set. */
+/**
+ * Normalize a raw type value into the internal set. MIXED passes through — a
+ * MIXED question is rendered item-by-item from each sub-part's own `options`
+ * (present ⇒ MCQ layout) / `type`, never as one uniform block.
+ */
 function normType(t) {
   const v = String(t || 'SHORT_ANSWER').trim().toUpperCase().replace(/\s+/g, '_');
   if (TYPE_ORDER.includes(v)) return v;
@@ -44,11 +48,31 @@ function normType(t) {
 const ALPHA = 'abcdefghijklmnopqrstuvwxyz'.split('');
 const ROMAN_UC = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII'];
 
-/** "Q1"/"Q.3"/"1"/"7" → plain display number text like "1.". */
-function displayNumberFromLabel(label, index) {
+/**
+ * Render a question's display number in the reference's numbering STYLE.
+ * `style` comes from the SchoolTemplate (`numbering.style`); 'auto' (the
+ * default and every existing call) keeps the historical `"N."` form, so output
+ * is byte-identical when no template overrides it.
+ */
+function styleNumber(n, style) {
+  if (!Number.isFinite(n) || n <= 0) return `${n}.`;
+  switch (style) {
+    case 'q-prefix': return `Q${n}.`;
+    case 'digit-paren': return `${n})`;
+    case 'paren-both': return `(${n})`;
+    case 'roman': return `${ROMAN_UC[n - 1] ?? n}.`;
+    case 'letter': return `${ALPHA[n - 1]?.toUpperCase() ?? n}.`;
+    case 'digit-dot':
+    case 'auto':
+    default: return `${n}.`;
+  }
+}
+
+/** "Q1"/"Q.3"/"1"/"7" → display number text in the given style (default "1."). */
+function displayNumberFromLabel(label, index, style = 'auto') {
   const m = String(label ?? '').match(/(\d+)/);
   const n = m ? Number(m[1]) : null;
-  return (Number.isFinite(n) && n > 0 ? n : index + 1) + '.';
+  return styleNumber(Number.isFinite(n) && n > 0 ? n : index + 1, style);
 }
 
 /** Sub-part letter label: explicit label wins, else a., b., c. … */
@@ -70,6 +94,177 @@ function numericMarks(q) {
   return Number.isFinite(q?.marks) && q.marks > 0 ? q.marks : null;
 }
 
+// Fragments that mean an upstream generation/parse step failed and dumped its
+// error into the content — never belong on a paper.
+const ERROR_ARTIFACT_RE = /\b(SyntaxError|TypeError|ReferenceError|RangeError)\b|JSON\.parse|Box contains text outside JSON|<\/?code>|\bundefined\s+is\s+not\b/i;
+
+/**
+ * Defend the rendered paper against degenerate LLM output: a runaway repetition
+ * loop ("nicely cleanly clearly easily nicely cleanly…" for pages), a leaked
+ * runtime-error string, or absurd length. Real prose passes through unchanged;
+ * only clearly-broken text is clamped, with a trailing "…".
+ */
+function sanitizeProse(raw, max = 1200) {
+  let s = String(raw ?? '').replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  const errAt = s.search(ERROR_ARTIFACT_RE);
+  if (errAt > 20) s = s.slice(0, errAt).trim();
+  const words = s.split(' ');
+  if (words.length > 40) {
+    const uniqueRatio = new Set(words.map((w) => w.toLowerCase())).size / words.length;
+    if (uniqueRatio < 0.25) {
+      // Degenerate repetition. Keep the first real sentence if there is one
+      // early; otherwise keep only the distinct words (the loop's vocabulary).
+      const stop = s.search(/[.!?](\s|$)/);
+      if (stop > 0 && stop < 240) return `${s.slice(0, stop + 1).trim()} …`;
+      const seen = [];
+      for (const w of words) { if (!seen.includes(w)) seen.push(w); if (seen.length >= 15) break; }
+      return `${seen.join(' ').trim()} …`;
+    }
+  }
+  if (s.length > max) {
+    const cut = s.lastIndexOf('. ', max);
+    return `${(cut > max * 0.5 ? s.slice(0, cut + 1) : s.slice(0, max)).trim()} …`;
+  }
+  return s;
+}
+
+/** Marking scheme → [{ point, marks }] with clean strings / positive marks. */
+function normalizeMarkingScheme(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((s) => {
+      const point = sanitizeProse(s?.point ?? s?.text ?? '', 400);
+      const m = Number(s?.marks);
+      return { point, marks: Number.isFinite(m) && m > 0 ? Math.round(m * 10) / 10 : null };
+    })
+    .filter((s) => s.point);
+}
+
+const IMAGE_DATA_URI_RE = /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=\s]+$/;
+
+/**
+ * Build a data URI from a raw base64 string + mimeType, accepting either a
+ * bare base64 blob or a pre-formed `data:…` URI.
+ */
+export function toDataUri(data, mimeType = 'image/png') {
+  if (!data) return null;
+  const s = String(data).replace(/\s+/g, '');
+  if (IMAGE_DATA_URI_RE.test(s)) return s;
+  // Bare base64 — wrap it.
+  if (/^[A-Za-z0-9+/=]{20,}$/.test(s)) return `data:${mimeType};base64,${s}`;
+  return null;
+}
+
+/**
+ * Image MVP (Phase 4). Merges two sources of renderable image pixels:
+ *
+ *   1. `raw.assetImages` — explicit teacher-supplied pixels in the old format:
+ *        [{ dataUri, alt, widthPct, itemLabel }]
+ *
+ *   2. `raw.imageAssets` — detected reference-paper images produced by
+ *      asset-associator and carried through the question-generator:
+ *        [{ id, data, base64, mimeType, layout: { widthRatio, … }, … }]
+ *
+ * `itemLabel === null` → image belongs to the whole question; a matching label
+ * → it belongs to that sub-question. Only entries with real pixel data survive.
+ */
+export function normalizeAssetImages(raw) {
+  const out = [];
+
+  // Source 1: teacher-upload format (existing path, unchanged)
+  for (const im of (Array.isArray(raw?.assetImages) ? raw.assetImages : [])) {
+    const uri = typeof im?.dataUri === 'string' ? toDataUri(im.dataUri) : null;
+    if (!uri) continue;
+    out.push({
+      dataUri: uri,
+      alt: String(im?.alt ?? '').trim(),
+      widthPct: Number.isFinite(Number(im?.widthPct)) && Number(im.widthPct) > 0 && Number(im.widthPct) <= 100
+        ? Number(im.widthPct)
+        : null,
+      itemLabel: im?.itemLabel != null && String(im.itemLabel).trim() ? String(im.itemLabel).trim() : null,
+    });
+  }
+
+  // Source 2: blueprint-detected imageAssets (Phase 4 image-based questions).
+  // `dataUri` is the field every real asset record in this codebase carries
+  // (asset-associator, question-generator, /analyze) — `data`/`base64` kept
+  // only for back-compat callers. question-generator.agent.js always mirrors
+  // imageAssets onto assetImages too, so the SAME picture would otherwise be
+  // pushed twice (once per source) — de-dupe on the resolved data URI.
+  const seen = new Set(out.map((o) => o.dataUri));
+  for (const im of (Array.isArray(raw?.imageAssets) ? raw.imageAssets : [])) {
+    const rawData = im?.dataUri || im?.data || im?.base64 || '';
+    const mime = String(im?.mimeType || 'image/png');
+    const uri = toDataUri(rawData, mime);
+    if (!uri || seen.has(uri)) continue;
+    seen.add(uri);
+    // widthRatio (0–1) → widthPct (1–100) clamped to reasonable range
+    const ratio = Number(im?.layout?.widthRatio ?? im?.widthRatio);
+    const widthPct = Number.isFinite(ratio) && ratio > 0
+      ? Math.round(Math.min(1, ratio) * 100)
+      : null;
+    out.push({
+      dataUri: uri,
+      alt: String(im?.alt ?? im?.id ?? 'Reference image').trim(),
+      widthPct,
+      itemLabel: null, // blueprint images are always question-level
+    });
+  }
+
+  return out;
+}
+
+/**
+ * Read-only asset METADATA (id / type / role / page / confidence) carried from
+ * the locked blueprint slot by the deterministic asset-associator. Rendered
+ * nowhere — a review-screen hint that the reference had a figure here.
+ */
+function normalizeAssetMeta(list) {
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((a) => ({
+      id: a?.id != null ? String(a.id) : null,
+      type: a?.type === 'table' ? 'table' : 'image',
+      role: a?.role != null ? String(a.role) : null,
+      pageNumber: Number.isFinite(Number(a?.pageNumber)) ? Number(a.pageNumber) : null,
+      confidence: a?.confidence != null ? String(a.confidence) : null,
+    }))
+    .filter((a) => a.id);
+}
+
+const DUP_STOPWORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'on', 'at', 'by', 'for', 'with', 'from',
+  'is', 'are', 'was', 'were', 'be', 'as', 'that', 'this', 'it', 'its', 'his', 'her', 'their',
+  'what', 'why', 'how', 'who', 'which', 'when', 'about', 'into', 'down', 'up', 'out', 'after',
+]);
+
+/** Content-word set of a string (lowercased, punctuation-stripped, stopwords removed). */
+function contentWords(s) {
+  return new Set(
+    String(s || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length > 2 && !DUP_STOPWORDS.has(w)),
+  );
+}
+
+/**
+ * True when two prompts ask essentially the same thing — used to catch a lone
+ * generated sub-part that merely restates its question stem (which would print
+ * as the same question twice). Overlap is measured against the smaller
+ * content-word set so a longer restatement still counts.
+ */
+function nearDuplicateText(a, b) {
+  const A = contentWords(a);
+  const B = contentWords(b);
+  if (A.size < 3 || B.size < 3) return false;
+  let shared = 0;
+  for (const w of A) if (B.has(w)) shared += 1;
+  return shared / Math.min(A.size, B.size) >= 0.7;
+}
+
 /**
  * Build the full paper model.
  *
@@ -84,20 +279,41 @@ function numericMarks(q) {
 export function buildPaperModel({ questions = [], blueprint = null, settings = {}, subject = '', format = {} }) {
   const warnings = [];
   const docClass = String(settings.class ?? '');
-  const titleLines = [];
 
-  if (format.schoolName && String(format.schoolName).trim()) {
+  // ── SchoolTemplate (VISUAL layer, Phase 2/3) ─────────────────────────────
+  // `format.schoolTemplate` is the persisted visual object (or absent). Every
+  // read below falls back to the historical behaviour, so a model built
+  // WITHOUT a template is byte-identical to before. It carries zero structure.
+  const st = format.schoolTemplate && typeof format.schoolTemplate === 'object' ? format.schoolTemplate : null;
+  const stHeader = st?.header ?? {};
+  const show = (key, dflt = true) => (typeof stHeader[key] === 'boolean' ? stHeader[key] : dflt);
+  const numberingStyle = st?.numbering?.style || 'auto';
+
+  const titleLines = [];
+  if (show('showSchoolName') && format.schoolName && String(format.schoolName).trim()) {
     titleLines.push({ text: String(format.schoolName).trim(), bold: true });
   }
-  const exam = [String(format.examTitle || 'Examination').trim(), String(format.session || '').trim()].filter(Boolean).join(' ');
+  const examParts = [];
+  if (show('showExamTitle')) examParts.push(String(format.examTitle || 'Examination').trim());
+  if (show('showSession')) examParts.push(String(format.session || '').trim());
+  const exam = examParts.filter(Boolean).join(' ');
   if (exam) titleLines.push({ text: exam, bold: true });
-  if (subject) titleLines.push({ text: `SUBJECT - ${String(subject).toUpperCase()}`, bold: true });
-  titleLines.push({ text: `CLASS - ${classLabel(docClass) || ''}`.replace(/  +/g, ' ').trim(), bold: true });
+  if (show('showSubject') && subject) titleLines.push({ text: `SUBJECT - ${String(subject).toUpperCase()}`, bold: true });
+  if (show('showClass')) titleLines.push({ text: `CLASS - ${classLabel(docClass) || ''}`.replace(/  +/g, ' ').trim(), bold: true });
 
-  const timeAllowed = String(format.timeAllowed || '').trim();
-  const maximumMarks = String(format.maximumMarks ?? '').trim() === ''
-    ? ''
-    : String(format.maximumMarks).trim();
+  // Student-information blanks (SchoolTemplate only; empty otherwise). Order is
+  // fixed here so the preview and the print match.
+  const STUDENT_FIELD_LABELS = { name: 'Name', rollNumber: 'Roll No.', class: 'Class', section: 'Section', date: 'Date', invigilatorSignature: "Invigilator's Signature" };
+  const studentInfoFields = st?.studentInfo
+    ? Object.keys(STUDENT_FIELD_LABELS).filter((k) => st.studentInfo[k] === true).map((k) => STUDENT_FIELD_LABELS[k])
+    : [];
+
+  // The Time / Maximum-Marks header row is shown unless a SchoolTemplate turns
+  // it off. `maximumMarks` stays blueprint-authoritative internally; the toggle
+  // only controls whether the printed line appears.
+  const timeAllowed = show('showDuration') ? String(format.timeAllowed || '').trim() : '';
+  const showMaximumMarks = show('showMaximumMarks');
+  const formatMaximumMarks = String(format.maximumMarks ?? '').trim();
 
   const instructions = Array.isArray(format.instructions)
     ? format.instructions.map((i) => String(i || '').trim()).filter(Boolean)
@@ -106,6 +322,35 @@ export function buildPaperModel({ questions = [], blueprint = null, settings = {
   const bpQuestions = blueprint && Array.isArray(blueprint.questions) && blueprint.questions.length > 0
     ? blueprint.questions
     : null;
+
+  // BLUEPRINT IS AUTHORITATIVE FOR THE PRINTED "Maximum Marks".
+  // `format` is a device-global, cross-paper value (localStorage) — a stale
+  // header carried over from a *different* reference paper (e.g. a Unit 3 /
+  // 60-mark paper) must never override the locked total of the paper actually
+  // being rendered. The teacher assigns units only, never the paper total.
+  const bpTotalMarks = (() => {
+    const direct = Number(blueprint?.totalMarks);
+    if (Number.isFinite(direct) && direct > 0) return direct;
+    const fromPaper = Number(blueprint?.paper?.maximumMarks);
+    if (Number.isFinite(fromPaper) && fromPaper > 0) return fromPaper;
+    if (bpQuestions) {
+      const sum = bpQuestions.reduce((acc, q) => {
+        const m = Number(q?.totalMarks ?? q?.marks?.total);
+        return acc + (Number.isFinite(m) && m > 0 ? m : 0);
+      }, 0);
+      if (sum > 0) return sum;
+    }
+    return null;
+  })();
+  const maximumMarks = bpTotalMarks != null
+    ? String(bpTotalMarks)
+    : formatMaximumMarks;
+  if (bpTotalMarks != null && formatMaximumMarks !== '' && formatMaximumMarks !== String(bpTotalMarks)) {
+    warnings.push(
+      `Saved paper header "Maximum Marks: ${formatMaximumMarks}" does not match the blueprint total (${bpTotalMarks}); ` +
+      'the blueprint total is authoritative and was used.',
+    );
+  }
   const bpSections = bpQuestions && Array.isArray(blueprint.sections) ? blueprint.sections : null;
   const blueprintMode = !!bpQuestions;
 
@@ -117,7 +362,7 @@ export function buildPaperModel({ questions = [], blueprint = null, settings = {
   // rendered question. Free-form entries pass null and fall back to number.
   const buildEntry = (raw, number, numberText, key, slotLabel = null) => {
     const type = normType(raw.type);
-    let text = String(raw.text || '').trim();
+    let text = sanitizeProse(raw.text, 1400);
     let options = Array.isArray(raw.options) && raw.options.length > 0
       ? raw.options.map((o, i) => cleanOptionText(o, i)).filter(Boolean)
       : [];
@@ -137,7 +382,10 @@ export function buildPaperModel({ questions = [], blueprint = null, settings = {
       ? raw.subParts
           .map((sp, i) => ({
             label: partLabel(sp, i),
-            text: String(sp?.text ?? '').trim(),
+            text: sanitizeProse(sp?.text, 1000),
+            // Per-item type (MIXED slots carry it) — item-driven rendering and
+            // the answer key read this; the student paper renderer ignores it.
+            type: sp?.type != null ? String(sp.type).trim().toUpperCase() : null,
             options: Array.isArray(sp?.options) && sp.options.length > 0
               ? sp.options.map((o, j) => cleanOptionText(o, j)).filter(Boolean)
               : [],
@@ -145,9 +393,63 @@ export function buildPaperModel({ questions = [], blueprint = null, settings = {
               const m = Number(sp?.marks);
               return Number.isFinite(m) && m > 0 ? m : null;
             })(),
+            // Answer-key data. Carried onto the model so the answer-key renderer
+            // reads the SAME model as the paper. The student-paper renderer must
+            // ignore these (paperHtml.buildPaperHtml never emits them).
+            //
+            // `keyMarks` is the ANSWER KEY'S own per-item marks — what the key
+            // says the item is worth for marking. It defaults to the paper's
+            // value and is edited only on the Answer Key screen; `marks` (the
+            // number the paper prints) is never touched by that edit.
+            keyMarks: (() => {
+              const k = Number(sp?.keyMarks);
+              if (Number.isFinite(k) && k > 0) return k;
+              const m = Number(sp?.marks);
+              return Number.isFinite(m) && m > 0 ? m : null;
+            })(),
+            answer: sanitizeProse(sp?.answer, 1400),
+            rationale: sanitizeProse(sp?.rationale, 700),
+            markingScheme: normalizeMarkingScheme(sp?.markingScheme),
           }))
           .filter((sp) => sp.text)
       : [];
+
+    // ── Single-item question: drop a lone sub-part that just restates the stem ─
+    // A blueprint slot with itemCount <= 1 is a SINGLE-STEM question and carries
+    // no lettered parts. When the generator still wraps it in one sub-part whose
+    // wording paraphrases the stem, printing both reads as the same question
+    // asked twice (and the answer key shows a stray "a."). Collapse to one stem
+    // and lift the sub-part's answer-key data onto the question.
+    let qAnswer = sanitizeProse(raw?.answer, 1400);
+    let qRationale = sanitizeProse(raw?.rationale, 700);
+    let qMarkingScheme = raw?.markingScheme;
+    let qKeyMarks = raw?.keyMarks;
+    if (subParts.length === 1 && !raw.passage && subParts[0].options.length === 0) {
+      const sp = subParts[0];
+      const slotItemCount = Number(raw._slotItemCount ?? raw.itemCount);
+      const singleItemSlot = Number.isFinite(slotItemCount) ? slotItemCount <= 1 : null;
+      const collapse = singleItemSlot === true || (singleItemSlot === null && nearDuplicateText(text, sp.text));
+      if (collapse) {
+        // Keep the fuller wording as the stem. When the printed stem is only an
+        // instruction line ("Fill in the blanks:", "Choose the correct answer.")
+        // and the sub-part carries the actual content, the sub-part text IS the
+        // question — promote it even though it is not a paraphrase of the
+        // instruction. (Regression: the old `sp.text.length > text.length &&
+        // nearDuplicateText(...)` guard refused to promote non-duplicate
+        // content, so single-item questions printed a bare instruction line and
+        // the generated question vanished from the student PDF.)
+        const stemIsInstructionLine = text.length <= 80 && /[::]$/.test(text.trim());
+        if (!text || (sp.text.length > text.length && nearDuplicateText(text, sp.text)) || (stemIsInstructionLine && sp.text)) {
+          text = sp.text;
+        }
+        if (!qAnswer && sp.answer) qAnswer = sp.answer;
+        if (!qRationale && sp.rationale) qRationale = sp.rationale;
+        if ((!Array.isArray(qMarkingScheme) || qMarkingScheme.length === 0) && sp.markingScheme.length > 0) qMarkingScheme = sp.markingScheme;
+        if (qKeyMarks == null && sp.keyMarks != null) qKeyMarks = sp.keyMarks;
+        subParts = [];
+      }
+    }
+
     // MIXED per-part marks (reference Q4 style: 1,2,2,2,3): render each part's
     // own "(N)" annotation the way the reference paper does. Uniform per-part
     // marks stay unannotated (the question line already shows the PxN=M).
@@ -156,6 +458,18 @@ export function buildPaperModel({ questions = [], blueprint = null, settings = {
       if (distinct.size > 1) {
         subParts = subParts.map((sp) => ({ ...sp, text: `${sp.text} (${sp.marks})` }));
       }
+    }
+
+    // ── Images (Phase 4 MVP) ────────────────────────────────────────────────
+    // Teacher-supplied pixels only. Item-labelled images attach to their
+    // sub-part (question → asset → sub-question); the rest are question-level.
+    const allImages = normalizeAssetImages(raw);
+    const questionImages = allImages.filter((im) => !im.itemLabel);
+    if (subParts.length > 0 && allImages.some((im) => im.itemLabel)) {
+      subParts = subParts.map((sp) => {
+        const imgs = allImages.filter((im) => im.itemLabel === sp.label);
+        return imgs.length > 0 ? { ...sp, images: imgs } : sp;
+      });
     }
 
     // Structured MATCH columns / INTERNAL_CHOICE branches — kept structured,
@@ -170,9 +484,18 @@ export function buildPaperModel({ questions = [], blueprint = null, settings = {
       ? raw.choices
           .map((c, i) => {
             const parts = Array.isArray(c?.subParts) && c.subParts.length > 0
-              ? c.subParts.map((sp, j) => ({ label: partLabel(sp, j), text: String(sp?.text ?? '').trim() })).filter((p) => p.text)
+              ? c.subParts.map((sp, j) => ({ label: partLabel(sp, j), text: sanitizeProse(sp?.text, 1000) })).filter((p) => p.text)
               : [];
-            return { label: choiceLabel(c, i), text: String(c?.text ?? '').trim(), subParts: parts };
+            // PHASE 6: each OR branch keeps its own answer key entry so the
+            // answer key can show an answer for BOTH branches. The student
+            // paper renderer never prints these.
+            return {
+              label: choiceLabel(c, i),
+              text: sanitizeProse(c?.text, 1400),
+              subParts: parts,
+              answer: sanitizeProse(c?.answer, 1400),
+              rationale: sanitizeProse(c?.rationale, 700),
+            };
           })
           .filter((c) => c.text || c.subParts.length > 0)
       : [];
@@ -182,16 +505,39 @@ export function buildPaperModel({ questions = [], blueprint = null, settings = {
       label: slotLabel ?? null,
       type,
       text,
-      passage: raw.passage ? String(raw.passage) : '',
+      passage: raw.passage ? sanitizeProse(raw.passage, 4000) : '',
       marks: numericMarks(raw),
       marksText: applyMarksCase(marksLabel(raw), format.marksCase),
       difficulty: raw.difficulty,
       options, // pure option text; labels generated at render time
       subParts,
+      // Renderable question-level images (teacher-supplied pixels only).
+      images: questionImages,
+      // Read-only asset metadata from the locked blueprint slot / generated
+      // question — a review hint, never rendered onto the paper.
+      assets: normalizeAssetMeta(raw.assets),
       columns,
+      // MATCH answer key — one { left, right } pair per row. Consumed by the
+      // answer-key renderers; the student paper never emits it.
+      answerPairs: Array.isArray(raw?.answerPairs)
+        ? raw.answerPairs.map((p) => ({ left: String(p?.left ?? ''), right: String(p?.right ?? '') }))
+        : null,
       choices,
       number,
       numberText,
+      // Answer-key data for a single-stem question (multi-item questions carry
+      // theirs per sub-part). Never rendered onto the student paper. These pick
+      // up a lone collapsed sub-part's answer (see the single-item block above).
+      answer: qAnswer,
+      rationale: qRationale,
+      markingScheme: normalizeMarkingScheme(qMarkingScheme),
+      // The answer key's own marks for a single-stem question — defaults to the
+      // paper's total; edited only on the Answer Key screen.
+      keyMarks: (() => {
+        const k = Number(qKeyMarks);
+        if (Number.isFinite(k) && k > 0) return k;
+        return numericMarks(raw);
+      })(),
     };
   };
 
@@ -236,8 +582,9 @@ export function buildPaperModel({ questions = [], blueprint = null, settings = {
         }
         return null;
       }
-      const numberText = displayNumberFromLabel(bpq.label, slotIdx);
-      const number = parseInt(numberText, 10) || slotIdx + 1;
+      const numberText = displayNumberFromLabel(bpq.label, slotIdx, numberingStyle);
+      const labelDigit = String(bpq.label ?? '').match(/(\d+)/);
+      const number = (labelDigit && Number(labelDigit[1]) > 0 ? Number(labelDigit[1]) : slotIdx + 1);
       // Marks are authoritative in the blueprint: prefer the generated
       // question's own expression, else the locked slot's expression / total.
       const marksAnnotated = { ...raw };
@@ -246,6 +593,30 @@ export function buildPaperModel({ questions = [], blueprint = null, settings = {
         if (bpExpr) marksAnnotated.markExpression = bpExpr;
         else if (Number.isFinite(bpq.totalMarks)) marksAnnotated.markExpression = String(bpq.totalMarks);
         else if (Number.isFinite(bpq.marks?.total)) marksAnnotated.markExpression = String(bpq.marks.total);
+      }
+      // Asset METADATA from the locked blueprint slot (deterministic
+      // asset-associator output). Metadata only — pixels come from the teacher's
+      // `assetImages`; this never renders a figure by itself.
+      if (!marksAnnotated.assets && Array.isArray(bpq.assets) && bpq.assets.length > 0) {
+        marksAnnotated.assets = bpq.assets;
+      }
+      // IMAGE_BASED slot: propagate the blueprint slot's imageAssets (reference-
+      // paper pixels extracted by docling) onto the merged object so they flow
+      // through normalizeAssetImages → buildEntry → q.images → the HTML preview
+      // and pdfmake PDF renderers. The generated question also carries them (set
+      // by question-generator.agent.js), but the blueprint slot is authoritative
+      // for Phase 4 locked slots — merge both so neither is lost.
+      if (!Array.isArray(marksAnnotated.imageAssets) || marksAnnotated.imageAssets.length === 0) {
+        if (Array.isArray(bpq.imageAssets) && bpq.imageAssets.length > 0) {
+          marksAnnotated.imageAssets = bpq.imageAssets;
+        }
+      }
+      // The locked slot's item count — a slot with <= 1 item is a single-stem
+      // question and must not print a lettered sub-part (buildEntry collapses a
+      // redundant lone sub-part using this).
+      if (marksAnnotated._slotItemCount == null) {
+        const ic = Number(bpq.itemCount ?? bpq.items?.length ?? bpq.subQuestionCount);
+        if (Number.isFinite(ic)) marksAnnotated._slotItemCount = ic;
       }
       const entry = buildEntry(marksAnnotated, number, numberText, `slot-${slotIdx}`, slotKey(bpq, slotIdx));
       assigned.add(slotIdx);
@@ -305,7 +676,7 @@ export function buildPaperModel({ questions = [], blueprint = null, settings = {
   } else {
     // ── Free-form fallback (no blueprint): ONE FLAT LIST, no invented sections.
     given.forEach((raw, i) => {
-      unsectionedQuestions.push(buildEntry(raw, i + 1, `${i + 1}.`, raw.questionId || `q-${i + 1}`));
+      unsectionedQuestions.push(buildEntry(raw, i + 1, styleNumber(i + 1, numberingStyle), raw.questionId || `q-${i + 1}`));
     });
   }
 
@@ -313,7 +684,16 @@ export function buildPaperModel({ questions = [], blueprint = null, settings = {
   const totalMarks = (questions || []).reduce((acc, q) => acc + (Number.isFinite(q?.marks) ? q.marks : 0), 0);
 
   return {
-    header: { titleLines, timeAllowed, maximumMarks: maximumMarks || (totalMarks > 0 ? String(totalMarks) : '') },
+    header: {
+      titleLines,
+      timeAllowed,
+      maximumMarks: showMaximumMarks ? (maximumMarks || (totalMarks > 0 ? String(totalMarks) : '')) : '',
+      // SchoolTemplate visual extras (null/[]/false when no template) — renderers
+      // read these; a null `schoolTemplate` leaves every renderer on its old path.
+      logo: st?.header?.logo?.dataUri ? { dataUri: st.header.logo.dataUri, heightPt: st.header.logo.heightPt || 48 } : null,
+      studentInfoFields,
+      repeatOnLaterPages: st?.header?.repeatOnLaterPages === true,
+    },
     instructions,
     // Verbatim heading captured from the reference ("General Instructions :"
     // is only the fallback) — preview, PDF and print all render this exact text.
@@ -324,6 +704,10 @@ export function buildPaperModel({ questions = [], blueprint = null, settings = {
     totalMarks,
     blueprintMode,
     layoutWarnings: warnings,
+    // The resolved visual template (or null). Page geometry, font, border and
+    // footer live here for paperPdf / paperHtml; structure is never present.
+    schoolTemplate: st,
+    numberingStyle,
   };
 }
 
@@ -356,8 +740,12 @@ function questionCost(q, textWidth) {
   let cost = estLines(q.text, textWidth) * PREVIEW.bodyLinePx;
   if (q.passage) cost += estLines(q.passage, textWidth) * PREVIEW.bodyLinePx;
   cost += q.options.length * PREVIEW.bodyLinePx;
+  // Rough fixed budget per teacher-supplied figure so preview page breaks
+  // stay near the PDF flow.
+  cost += (q.images?.length || 0) * 150;
   for (const sp of q.subParts) {
     cost += estLines(sp.text, textWidth) * PREVIEW.bodyLinePx;
+    cost += (sp.images?.length || 0) * 150;
     cost += sp.options.length * PREVIEW.bodyLinePx;
   }
   if (q.columns) {

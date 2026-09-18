@@ -2,6 +2,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { env } from '../config/env.js';
 import { embeddingCache } from './embedding-cache.js';
 import { bumpAi } from './perf-context.js';
+import { openRouterEmbeddingClient } from './openrouter-embedding.client.js';
 
 /**
  * Centralized Gemini client with TWO bounded failover layers:
@@ -30,6 +31,25 @@ import { bumpAi } from './perf-context.js';
 
 const DEFAULT_TIMEOUT_MS = 90000;   // per-call timeout (unchanged from before)
 const MODEL_SWITCH_DELAY_MS = 1200; // short bounded pause before trying the next model (never minutes)
+
+/**
+ * Turn image asset records into Gemini inlineData parts. Accepts either a
+ * bare base64/data-URI string or the asset-record shape this codebase uses
+ * everywhere (blueprint imageAssets, asset-associator output): `dataUri`,
+ * with `data`/`base64` kept only for back-compat callers. An asset with no
+ * pixel data is dropped rather than sent as an empty inlineData part — never
+ * fabricate image bytes that were not actually extracted.
+ * @param {Array<string|Object>} images
+ * @returns {Array<{ inlineData: { mimeType: string, data: string } }>}
+ */
+export function buildImageParts(images) {
+  return (Array.isArray(images) ? images : []).map((img) => {
+    const raw = typeof img === 'string' ? img : (img.dataUri || img.data || img.base64 || '');
+    const data = String(raw || '').replace(/^data:image\/[a-z]+;base64,/, '');
+    const mimeType = (typeof img === 'object' && img.mimeType) || 'image/png';
+    return { inlineData: { mimeType, data } };
+  }).filter((part) => Boolean(part.inlineData.data));
+}
 
 /**
  * Classify a Gemini SDK error into a category + whether it is eligible for
@@ -67,9 +87,14 @@ export class GeminiFailoverClient {
    * @param {Object} [opts] - test seam: inject keys / starting rotation index
    */
   constructor(opts = {}) {
+    // Never fabricate a key slot: with the whole Gemini pool removed (e.g. a
+    // deploy that only uses OpenRouter), keys stays EMPTY and availability
+    // checks report "not configured" instead of attempting a bogus call.
     this.keys = opts.keys && opts.keys.length > 0
       ? opts.keys
-      : env.GEMINI_API_KEYS.length > 0 ? env.GEMINI_API_KEYS : [env.GEMINI_API_KEY];
+      : env.GEMINI_API_KEYS.length > 0
+        ? env.GEMINI_API_KEYS
+        : (env.GEMINI_API_KEY ? [env.GEMINI_API_KEY] : []);
     this.currentKeyIndex = opts.startKeyIndex ?? 0;
     console.log(`[Gemini Client] Initialized with ${this.keys.length} API key(s) in the failover pool.`);
   }
@@ -174,8 +199,16 @@ export class GeminiFailoverClient {
    * Embed a single text with key failover ONLY — the embedding model is never
    * swapped (vector dimension stability + Qdrant collection integrity).
    * Served from the in-memory cache when possible (zero API calls).
+   *
+   * Provider dispatch: EMBEDDING_PROVIDER routes the embedding leg to OpenRouter
+   * (nvidia/llama-nemotron-embed-vl-1b-v2:free, 2048-d) or legacy Gemini. The
+   * rest of the app only ever calls embedContent/embedBatch — provider details
+   * stay behind this seam, so caller and test mocks are unaffected.
    */
   async embedContent(text) {
+    if (env.EMBEDDING_PROVIDER === 'openrouter') {
+      return openRouterEmbeddingClient.embedContent(text);
+    }
     const model = env.EMBEDDING_MODEL;
     const cached = embeddingCache.get(text, model);
     if (cached) return cached;
@@ -198,11 +231,18 @@ export class GeminiFailoverClient {
    * request). Key failover applies; the model is never swapped. Each input is
    * cache-checked first, so repeated texts add no API calls.
    *
+   * Provider dispatch: under EMBEDDING_PROVIDER=openrouter the whole list goes
+   * to openRouterEmbeddingClient in ONE /embeddings call (it has no ~100/call
+   * cap; chunkSize is ignored). `opts` stays accepted so callers are unchanged.
+   *
    * @param {string[]} texts - Non-empty list of texts
    * @param {Object} [opts] - { chunkSize?: number }
    * @returns {Promise<number[][]>} vectors in input order
    */
   async embedBatch(texts, opts = {}) {
+    if (env.EMBEDDING_PROVIDER === 'openrouter') {
+      return openRouterEmbeddingClient.embedBatch(texts);
+    }
     const chunkSize = opts.chunkSize ?? 100;
     const model = env.EMBEDDING_MODEL;
     const vectors = [];
@@ -238,19 +278,50 @@ export class GeminiFailoverClient {
   }
 
   /**
-   * Generate text/JSON with key + model failover (LLM calls only).
-   * Tries the primary model across all keys, then each configured fallback.
+   * RAW Gemini generation — key + model failover only. This is the Gemini leg
+   * of the multi-provider chain (services/ai/); the AI router's geminiProvider
+   * calls this directly so `generateContent()` can delegate to the router
+   * without recursing back into itself.
    */
-  async generateContent(prompt, generationConfig = {}) {
+  async generateRaw(prompt, generationConfig = {}) {
     const models = [env.GEMINI_MODEL, ...env.GEMINI_FALLBACK_MODELS];
+    const imageParts = buildImageParts(generationConfig.images);
+
+    const contentPayload = imageParts.length > 0 ? [prompt, ...imageParts] : prompt;
+
     return this.executeWithFailover(async (genAI, keyIndex, modelName) => {
       const model = genAI.getGenerativeModel({
         model: modelName,
-        generationConfig,
+        generationConfig: {
+          temperature: generationConfig.temperature,
+          maxOutputTokens: generationConfig.maxOutputTokens,
+          responseMimeType: generationConfig.responseMimeType,
+          ...(generationConfig.responseSchema ? { responseSchema: generationConfig.responseSchema } : {}),
+        },
       });
-      const response = await model.generateContent(prompt, { maxRetries: 0 });
+      const response = await model.generateContent(contentPayload, { maxRetries: 0 });
       return response.response.text();
     }, { models, aiKey: 'geminiRequests' });
+  }
+
+  /**
+   * The app's LLM entry point (all agents call this). Routes through the
+   * multi-provider chain Token Harbor → xKiro → Groq → OpenRouter
+   * (services/ai/ai-router.service.js); FREE-only + fallback rules live there.
+   * Signature is unchanged so every existing caller and test mock still works.
+   * NOTE: Gemini is NOT in this chain (and never used for vision). This method
+   * only forwards to the router — it makes no Gemini API calls itself.
+   */
+  async generateContent(prompt, generationConfig = {}) {
+    const { aiRouter } = await import('./ai/ai-router.service.js');
+    return aiRouter.generate({
+      prompt,
+      temperature: generationConfig.temperature,
+      maxTokens: generationConfig.maxOutputTokens,
+      responseFormat: generationConfig.responseMimeType === 'application/json' ? 'json' : 'text',
+      responseSchema: generationConfig.responseSchema,
+      ...(Array.isArray(generationConfig.images) && generationConfig.images.length > 0 ? { images: generationConfig.images } : {}),
+    });
   }
 }
 

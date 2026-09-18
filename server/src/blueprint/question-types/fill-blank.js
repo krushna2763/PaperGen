@@ -8,6 +8,7 @@ export default {
   itemsIndependent: true,
   optionBearer: true,
   optionMode: 'optional', // a word bank may be offered, but blanks stand alone fine
+  answerShape: 'word', // answer = the missing word/phrase
   marksMode: 'perItem',
   countKey: 'itemCount',
   countLabel: 'Items',

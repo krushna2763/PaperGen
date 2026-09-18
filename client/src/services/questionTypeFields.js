@@ -16,6 +16,7 @@ export const FALLBACK_TYPES = [
   { id: 'LONG_ANSWER', label: 'Long answer', blueprintType: 'LONG_ANSWER', itemsIndependent: true, optionMode: 'none', marksMode: 'perItem', countKey: 'itemCount', countLabel: 'Items', countMin: 1, defaultInstruction: 'Answer the following questions in detail:' },
   { id: 'MATCH', label: 'Match the following', blueprintType: 'MATCH_THE_FOLLOWING', itemsIndependent: true, optionMode: 'none', marksMode: 'whole', countKey: 'itemCount', countLabel: 'Pairs', countMin: 2, defaultInstruction: 'Match the following columns:' },
   { id: 'DIFFERENCE_BETWEEN', label: 'Difference between', blueprintType: 'DIFFERENTIATE', itemsIndependent: true, optionMode: 'none', marksMode: 'perItem', countKey: 'itemCount', countLabel: 'Items', countMin: 1, defaultInstruction: 'Write the difference between the following:' },
+  { id: 'IMAGE_BASED', label: 'Image Based', blueprintType: 'IMAGE_BASED', itemsIndependent: false, optionMode: 'none', marksMode: 'perItem', countKey: 'itemCount', countLabel: 'Items', countMin: 1, defaultInstruction: 'Study the following image and answer the questions:' },
 ];
 
 /** Registry fields each type renders in the builder (mirrors server defs). */

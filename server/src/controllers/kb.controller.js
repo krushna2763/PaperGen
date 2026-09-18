@@ -1,9 +1,11 @@
 import { createHash } from 'crypto';
-import { pdfParser } from '../document/pdf-parser.js';
-import { chunkNotes } from '../document/notes-chunker.js';
-import { embeddingService } from '../rag/embeddings.js';
+import { pdfParser as _pdfParser } from '../document/pdf-parser.js';
+import { chunkNotes as _chunkNotes } from '../document/notes-chunker.js';
+import { embeddingService as _embeddingService } from '../rag/embeddings.js';
 import { qdrantStore } from '../rag/qdrant.js';
 import { checkTopicCoverage } from '../rag/topic-coverage.js';
+import { ingestNotes } from '../ingestion/ingestion.service.js';
+
 
 /**
  * Knowledge-base (syllabus corpus) controller.
@@ -41,29 +43,67 @@ export const uploadNotes = async (req, res, next) => {
       return res.status(200).json({
         success: true,
         message: 'These notes are already indexed — ingestion skipped.',
-        data: { reused: true, unit: existing.unit, chunkCount: existing.chunkCount, sourceHash },
+        data: {
+          reused: true,
+          unit: existing.unit,
+          chunkCount: existing.chunkCount,
+          sourceHash,
+          documentId: sourceHash,
+        },
       });
     }
 
-    const parsed = await pdfParser.parseBuffer(req.file.buffer);
-    const chunks = chunkNotes(parsed.text);
-    if (chunks.length === 0) {
-      return res.status(422).json({ success: false, message: 'No readable text found in the notes file.' });
-    }
+    // ENGINE SWITCH (PART 26): DOCUMENT_INGESTION_ENGINE=legacy (default) keeps
+    // the exact current behavior; =docling routes through the isolated Docling
+    // worker + semantic parent/child chunker with safe legacy fallback (PART 27)
+    // and content-hash conversion caching (PART 28). Both engines end in the
+    // same syllabus-corpus upsert contract (PART 8: notes are NEVER reference
+    // papers, whatever engine ran).
+    const result = await ingestNotes(req.file.buffer, {
+      class: cls,
+      subject,
+      unit,
+      sourceHash,
+      filename: req.file.originalname,
+    });
 
-    const embedded = await embeddingService.embedQuestions(chunks.map((c) => ({ text: c.text })));
-    const withVectors = chunks.map((c, i) => ({ ...c, embedding: embedded.questions[i].embedding }));
-
-    const result = await qdrantStore.upsertSyllabusChunks(withVectors, { class: cls, subject, unit, sourceHash });
-
-    console.log(`[KB Controller] Indexed ${result.indexedCount} note chunk(s) for Class ${cls} / ${subject} / unit ${unit}.`);
+    console.log(`[KB Controller] Indexed ${result.indexedCount} note chunk(s) for Class ${cls} / ${subject} / unit ${unit} (engine=${result.engine}).`);
     return res.status(200).json({
       success: true,
-      message: `Indexed ${result.indexedCount} note chunk(s) for unit "${unit}".`,
-      data: { ...result, extractionMethod: parsed.extractionMethod },
+      message: `Indexed ${result.chunkCount} note chunk(s) for unit "${unit}" (engine=${result.engine}).`,
+      data: {
+        ...result,
+        sourceHash: result.sourceHash || sourceHash,
+        documentId: result.sourceHash || sourceHash,
+        ingestionEngine: result.engine,
+        fallbackReason: result.fallbackReason ?? null,
+      },
     });
   } catch (error) {
     console.error('[KB Controller] Notes upload error:', error);
+    next(error);
+  }
+};
+
+
+/**
+ * GET /api/kb/documents?class=&subject=  ->  note documents for the scope.
+ *
+ * Mode B "Select from Knowledge Base": the ingested notes files (grouped from
+ * the ONE syllabus corpus by sourceHash), each with title, class, subject,
+ * units and chunk counts. A read-time view — no document store, no duplication.
+ */
+export const listDocuments = async (req, res, next) => {
+  try {
+    const cls = String(req.query.class ?? '').trim();
+    const subject = String(req.query.subject ?? '').trim();
+    if (!cls || !subject) {
+      return res.status(400).json({ success: false, message: '"class" and "subject" query params are required.' });
+    }
+    const documents = await qdrantStore.listSyllabusDocuments({ class: cls, subject });
+    return res.status(200).json({ success: true, data: documents });
+  } catch (error) {
+    console.error('[KB Controller] listDocuments error:', error);
     next(error);
   }
 };
@@ -134,4 +174,39 @@ export const topicCoverage = async (req, res, next) => {
   }
 };
 
-export default { uploadNotes, listUnits, listTopics, topicCoverage };
+/**
+ * GET /api/kb/notes/images?class=&subject=&unit=&sourceHash=&topic=&search=&imageType=&page=&limit=
+ *
+ * Mode B Image Based questions: discovers image-bearing topics and extracted
+ * picture assets from the notes explicitly selected for the paper.
+ */
+export const listNotesImages = async (req, res, next) => {
+  try {
+    const { getNotesImagesAndTopics } = await import('../services/notes-image.service.js');
+    const sourceHash = String(req.query.sourceHash || req.query.sourceHashes || '').trim();
+    if (!sourceHash) {
+      // Source isolation: No notes selected for this paper -> strictly NO images or topics
+      return res.status(200).json({
+        success: true,
+        data: { topics: [], images: [], totalImages: 0, page: 1, totalPages: 0 },
+      });
+    }
+    const result = await getNotesImagesAndTopics({
+      class: req.query.class,
+      subject: req.query.subject,
+      unit: req.query.unit,
+      sourceHash,
+      topic: req.query.topic,
+      search: req.query.search,
+      imageType: req.query.imageType,
+      page: req.query.page,
+      limit: req.query.limit,
+    });
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    console.error('[KB Controller] listNotesImages error:', error);
+    next(error);
+  }
+};
+
+export default { uploadNotes, listDocuments, listUnits, listTopics, topicCoverage, listNotesImages };

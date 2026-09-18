@@ -1,0 +1,7 @@
+# PaddleOCR worker — isolated Python service (same pattern as ingestion/docling).
+
+# HTTP layer uses the Python standard library, so the dependency surface is
+# only the OCR engine itself. CPU-only: no GPU and no paid API required.
+paddlepaddle==3.0.0
+paddleocr==3.2.0
+pillow>=10.0

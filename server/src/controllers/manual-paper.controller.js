@@ -40,14 +40,22 @@ export const createManualPaper = async (req, res, next) => {
     const body = req.body || {};
     const form = body.blueprint ?? body; // accept { blueprint } or the raw form
 
-    const cls = String(form?.paper?.class ?? body.class ?? '').trim();
-    const subject = String(form?.paper?.subject ?? body.subject ?? '').trim();
+    // Same scope rule as /generate: the request-level class/subject (the
+    // teacher's settings, the corpus key) beat the blueprint's header fields.
+    const cls = String(body.class ?? form?.paper?.class ?? '').trim();
+    const subject = String(body.subject ?? form?.paper?.subject ?? '').trim();
+    const selectedDocumentIds = body.selectedDocumentIds || form?.selectedDocumentIds || body.sourceHashes || form?.sourceHashes || body.sourceHash || form?.sourceHash || null;
 
-    // 1) Build + sync-validate (registry, counts, options, marks, sections).
+    // 1) Build + sync-validate (registry, counts, options, marks, sections, image sources).
     //    builder output survives the UNMODIFIED normalizer — the contract proof.
     let built;
     try {
-      built = buildManualBlueprint(form, { validate: true });
+      built = buildManualBlueprint(form, {
+        validate: true,
+        class: cls,
+        subject,
+        selectedDocumentIds,
+      });
     } catch (err) {
       return res.status(err.status || 400).json({ success: false, message: err.message });
     }

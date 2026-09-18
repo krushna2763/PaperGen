@@ -80,12 +80,30 @@ export const paperService = {
   },
 
   /**
-   * Per-slot generation progress.
+   * Per-slot generation progress and final result retrieval.
    * @param {string} jobId
-   * @returns {Promise<{ done, slots: Array<{ slot, label, state, attempts }> }>}
+   * @returns {Promise<{ done, slots: Array<{ slot, label, state, attempts }>, status, progressPercent, currentStage, result?, error? }>}
    */
   status: async (jobId) => {
     const response = await api.get(`/papers/${jobId}/status`);
+    return response.data;
+  },
+
+  /**
+   * Return the SSE telemetry stream endpoint URL for a given job.
+   * @param {string} jobId
+   * @returns {string}
+   */
+  getStreamUrl: (jobId) => `/api/papers/${encodeURIComponent(jobId)}/stream`,
+
+  /**
+   * Cancel an active generation job.
+   * @param {string} jobId
+   * @param {string} [reason]
+   * @returns {Promise<{ success: boolean, status: string, message: string }>}
+   */
+  cancel: async (jobId, reason) => {
+    const response = await api.post(`/papers/${encodeURIComponent(jobId)}/cancel`, { reason });
     return response.data;
   },
 
@@ -120,6 +138,18 @@ export const paperService = {
 };
 
 export const kbService = {
+  /**
+   * Note documents indexed for a class + subject (one entry = one ingested
+   * notes file, grouped from the syllabus corpus by content hash). Mode B
+   * "Select from Knowledge Base" lists and picks from these.
+   * @param {Object} params - { class, subject }
+   * @returns {Promise<{ success, data: Array<{ id, title, class, subject, units: Array<{ id, label, chunkCount }>, chunkCount, ingestedAt, filename }> }>}
+   */
+  listDocuments: async (params) => {
+    const response = await api.get('/kb/documents', { params });
+    return response.data;
+  },
+
   /**
    * Syllabus units that have notes indexed for a class + subject.
    * @param {Object} params - { class, subject }
@@ -160,6 +190,17 @@ export const kbService = {
     const response = await api.post('/kb/notes', form, {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
+    return response.data;
+  },
+
+  /**
+   * List images and image-bearing topics extracted from notes.
+   * Filterable by class, subject, unit, sourceHash, topic, or search.
+   * @param {Object} params - { class, subject, unit, sourceHash, topic, search }
+   * @returns {Promise<{ success, data: { topics: Array<{ topic, count, units }>, images: Array<Object>, totalImages } }>}
+   */
+  listNotesImages: async (params) => {
+    const response = await api.get('/kb/notes/images', { params });
     return response.data;
   },
 };
@@ -231,7 +272,65 @@ export const questionService = {
    */
   generate: async (params) => {
     const response = await api.post('/questions/generate', params);
-  return response.data;
+    return response.data;
+  },
+};
+
+export const libraryService = {
+  list: async (params) => {
+    const response = await api.get('/library', { params });
+    return response.data;
+  },
+  stats: async () => {
+    const response = await api.get('/library/stats');
+    return response.data;
+  },
+  get: async (id) => {
+    const response = await api.get(`/library/${id}`);
+    return response.data;
+  },
+  create: async (body) => {
+    const response = await api.post('/library', body);
+    return response.data;
+  },
+  patch: async (id, body) => {
+    const response = await api.patch(`/library/${id}`, body);
+    return response.data;
+  },
+  remove: async (id) => {
+    const response = await api.delete(`/library/${id}`);
+    return response.data;
+  },
+  duplicate: async (id) => {
+    const response = await api.post(`/library/${id}/duplicate`);
+    return response.data;
+  },
+};
+
+export const schoolTemplateService = {
+  list: async (params) => {
+    const response = await api.get('/school-templates', { params });
+    return response.data;
+  },
+  get: async (id) => {
+    const response = await api.get(`/school-templates/${id}`);
+    return response.data;
+  },
+  create: async (body) => {
+    const response = await api.post('/school-templates', body);
+    return response.data;
+  },
+  update: async (id, body) => {
+    const response = await api.put(`/school-templates/${id}`, body);
+    return response.data;
+  },
+  remove: async (id) => {
+    const response = await api.delete(`/school-templates/${id}`);
+    return response.data;
+  },
+  seed: async (body) => {
+    const response = await api.post('/school-templates/seed', body);
+    return response.data;
   },
 };
 

@@ -2,6 +2,8 @@ import { storageService } from '../services/storage.service.js';
 import { pdfParser } from '../document/pdf-parser.js';
 import { questionExtractor } from '../document/question-extractor.js';
 import { runReferenceAnalysis } from '../agents/reference-paper-analyzer.agent.js';
+import { env } from '../config/env.js';
+import { convertWithCache } from '../ingestion/ingestion.service.js';
 import { analyzeTemplate } from '../blueprint/template-analyzer.js';
 import { embeddingService } from '../rag/embeddings.js';
 import { qdrantStore } from '../rag/qdrant.js';
@@ -232,7 +234,45 @@ export const analyzePaper = async (req, res, next) => {
     const parsed = await pdfParser.parseBuffer(buffer);
     const extracted = questionExtractor.extract(parsed.text, parsed.pages);
 
-    const analysis = runReferenceAnalysis({ questions: extracted.questions, text: parsed.text });
+    // ASSET PHASE (additive): when the Docling engine is enabled and the
+    // worker is reachable, convert the reference PDF once more through Docling
+    // so images/tables (with page + bbox + reading order) can be associated
+    // with questions. Strictly non-fatal: any failure leaves the extraction
+    // exactly as the legacy path produced it — the blueprint never depends on
+    // the asset layer.
+    let structuredDoc = null;
+    let assetSource = 'none';
+    if (env.DOCUMENT_INGESTION_ENGINE === 'docling') {
+      try {
+        // convertWithCache applies the PART-28 disk cache (sha256 of the PDF
+        // bytes): the same reference PDF is converted ONCE — a cold-worker
+        // convert that exceeded DOCLING_TIMEOUT_MS used to be repeated on
+        // every analyze. Falls back per document on failure, exactly as before.
+        const out = await convertWithCache(buffer, { filename: 'reference.pdf', documentIdPrefix: 'ref' });
+        structuredDoc = out.document;
+        assetSource = 'docling';
+        console.log(`[Paper Controller] Docling enrichment for asset analysis: ${(structuredDoc?.elements || []).length} element(s) (engine=docling, ${out.cached ? 'cache HIT' : 'converted'}).`);
+      } catch (err) {
+        console.warn(`[Paper Controller] Docling unavailable for asset analysis (${err?.message ?? err}) — continuing text-only.`);
+      }
+    }
+
+    const analysis = runReferenceAnalysis({
+      questions: extracted.questions,
+      text: parsed.text,
+      structuredDoc,
+      // PHASE 1 — extraction context for the reconciler (OCR provenance,
+      // page/character counts). Only information the PDF/OCR layer produced;
+      // nothing is invented here.
+      extraction: {
+        extractionMethod: parsed.extractionMethod ?? null,
+        extractionStatus: parsed.extractionStatus ?? null,
+        pageCount: parsed.pageCount ?? (Array.isArray(parsed.pages) ? parsed.pages.length : null),
+        characterCount: parsed.characterCount ?? null,
+        ocr: parsed.ocr ?? null,
+        pages: Array.isArray(parsed.pages) ? parsed.pages : [],
+      },
+    });
     const blueprint = analysis.spec;
 
     const unitsWithNotes = await qdrantStore.listUnitsWithNotes({ class: cls, subject });
@@ -240,12 +280,27 @@ export const analyzePaper = async (req, res, next) => {
 
     const jobId = createJob(blueprint);
 
+    const diagCount = (analysis.diagnostics || []).length;
     console.log(
       `[Paper Controller] analyze: job ${jobId} — ${blueprint.questions.length} slot(s), ` +
-      `${(blueprint.sections || []).length} section(s), ${availableUnits.length} syllabus unit(s) with notes.`
+      `${(blueprint.sections || []).length} section(s), ${availableUnits.length} syllabus unit(s) with notes, ` +
+      `${diagCount} extraction diagnostic(s), confidence ${blueprint.confidence?.level ?? 'n/a'}.`
     );
 
-    return res.status(200).json({ jobId, blueprint, availableUnits });
+    return res.status(200).json({
+      jobId,
+      blueprint,
+      availableUnits,
+      // ADDITIVE (Phase 1): structured extraction diagnostics + deterministic
+      // confidence + extraction metadata. Existing contract fields unchanged.
+      diagnostics: analysis.diagnostics,
+      confidence: blueprint.confidence ?? null,
+      extractionMeta: blueprint.extractionMeta ?? null,
+      // ADDITIVE (asset phase): image/table assets associated with questions
+      // (empty list when the paper is text-only or Docling was unavailable).
+      assets: analysis.assets ?? [],
+      assetSource,
+    });
   } catch (error) {
     console.error('[Paper Controller] analyze error:', error);
     next(error);
@@ -302,7 +357,7 @@ export const embedPaperQuestions = async (req, res, next) => {
             count: 0,
             questions: [],
             vectorDimension: 0,
-            embeddingModel: process.env.EMBEDDING_MODEL || null,
+            embeddingModel: env.EMBEDDING_MODEL || null,
           }
         });
       }

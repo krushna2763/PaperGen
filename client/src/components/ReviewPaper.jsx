@@ -1,5 +1,3 @@
-/** @jsxImportSource react */
-/** @jsxFrag React.Fragment */
 /**
  * ReviewPaper — Mode B review screen (top-level component, imported by App).
  *
@@ -93,6 +91,7 @@ export default function ReviewPaper({
   staledCount,
   regenerateStaleSlot,
   onDownload,
+  onDownloadAnswerKey,
   onPrint,
   onOpen,
   onBack,
@@ -187,6 +186,19 @@ export default function ReviewPaper({
                 <path d="m7 10 5 5 5-5" />
                 <path d="M12 15V3" />
               </svg>
+            </button>
+            <button
+              type="button"
+              onClick={onDownloadAnswerKey}
+              className="h-7 flex items-center gap-1 rounded px-2 text-[11px] font-medium text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-colors"
+              title="Download the answer key (answers + marking scheme, separate document)"
+            >
+              <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <path d="m7 10 5 5 5-5" />
+                <path d="M12 15V3" />
+              </svg>
+              Key
             </button>
             <button
               type="button"
@@ -348,6 +360,13 @@ function QuestionBody({ q }) {
         <span>{p.text}</span>
       </div>
     ));
+
+  const images = Array.isArray(q.images) && q.images.length > 0
+    ? q.images
+    : Array.isArray(q.imageAssets) && q.imageAssets.length > 0
+      ? q.imageAssets
+      : q.image ? [{ dataUri: q.image }] : [];
+
   return (
     <>
       <div style={{ display: 'flex', alignItems: 'flex-start' }}>
@@ -355,6 +374,27 @@ function QuestionBody({ q }) {
         <span style={{ flex: 1, textAlign: 'justify' }}>{q.text}</span>
         {q.marksText && <span style={{ width: 42, textAlign: 'right', flexShrink: 0, marginLeft: 8 }}>{q.marksText}</span>}
       </div>
+      {images.length > 0 && (
+        <div style={{ textAlign: 'center', margin: '14px 0' }}>
+          {images.map((im, idx) => (
+            <img
+              key={idx}
+              src={im.dataUri || im.url}
+              alt={im.alt || 'Question Image'}
+              style={{
+                maxWidth: im.widthPct ? `${im.widthPct}%` : '65%',
+                maxHeight: 240,
+                objectFit: 'contain',
+                display: 'inline-block',
+                borderRadius: 6,
+                border: '1px solid #e5e7eb',
+                padding: 4,
+                backgroundColor: '#fff',
+              }}
+            />
+          ))}
+        </div>
+      )}
       {parts}
     </>
   );

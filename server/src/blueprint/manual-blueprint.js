@@ -206,6 +206,18 @@ function buildSlot(formQ, index) {
     generatorHint: def.generatorHint ?? null,
     // Topic coverage result is attached by the endpoint (async), not here.
     topicMatch: null,
+    ...(Array.isArray(formQ?.imageAssets) && formQ.imageAssets.length > 0
+      ? { imageAssets: formQ.imageAssets, assetImages: formQ.imageAssets }
+      : (formQ?.selectedImage ? { imageAssets: [formQ.selectedImage], assetImages: [formQ.selectedImage] } : {})),
+    ...(def.blueprintType === 'IMAGE_BASED' || formQ?.imageRequirement ? {
+      imageRequirement: formQ?.imageRequirement || { required: true, dependency: 'IMAGE_DEPENDENT' },
+      isLocked: true,
+      detectedUnit: formQ?.unit || (formQ?.selectedImage?.unit ?? null),
+      detectedTopic: topic || formQ?.imageTopic || (formQ?.selectedImage?.topic ?? null),
+    } : {}),
+    ...(formQ?.answerType ? { answerType: formQ.answerType } : {}),
+    ...(formQ?.imageTopic ? { imageTopic: formQ.imageTopic } : {}),
+    ...(formQ?.teacherHint ? { teacherHint: formQ.teacherHint } : {}),
   };
 
   return { question, errors };
@@ -236,6 +248,39 @@ function blockingErrors(blueprint, opts = {}) {
           slot: q.label,
           message: `Slot "${q.label}" must belong to a declared section (${declared.join(', ')}) but carries ${q.section ?? 'none'}.`,
         });
+      }
+    }
+  }
+
+  // Strict Image-Based Question Source Isolation Gate (Requirement §14, §24, Case 7)
+  const rawAllowed = opts.selectedDocumentIds || blueprint.paper?.selectedDocumentIds || blueprint.paper?.sourceHashes || null;
+  const selectedDocs = new Set(
+    (Array.isArray(rawAllowed)
+      ? rawAllowed
+      : rawAllowed
+        ? String(rawAllowed).split(',')
+        : []
+    ).map((s) => String(s || '').trim()).filter(Boolean)
+  );
+
+  for (const q of questions) {
+    if (q.type === 'IMAGE_BASED') {
+      const imgs = Array.isArray(q.imageAssets) ? q.imageAssets : [];
+      if (imgs.length === 0) {
+        errors.push({
+          slot: q.label,
+          message: `Slot "${q.label}" is Image Based but has no image selected.`,
+        });
+      } else if (selectedDocs.size > 0) {
+        for (const im of imgs) {
+          const docId = im.sourceDocumentId || im.sourceHash || im.documentId;
+          if (docId && !selectedDocs.has(String(docId))) {
+            errors.push({
+              slot: q.label,
+              message: `Slot "${q.label}": Selected image does not belong to the selected notes for this paper.`,
+            });
+          }
+        }
       }
     }
   }
@@ -380,7 +425,7 @@ export function buildManualBlueprint(form, opts = {}) {
   }
 
   if (opts.validate) {
-    errors.push(...blockingErrors(blueprint, { sections }));
+    errors.push(...blockingErrors(blueprint, { sections, ...opts }));
   }
 
   blueprint.blueprintWarnings = warnings;

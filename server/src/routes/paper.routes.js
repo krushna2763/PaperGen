@@ -8,7 +8,7 @@ import {
   embedPaperQuestions,
   indexPaperQuestions
 } from '../controllers/paper.controller.js';
-import { generatePaper, jobStatus } from '../controllers/generate.controller.js';
+import { generatePaper, jobStatus, regenerateSlot, generateAnswer, streamPaperJob, cancelGeneration } from '../controllers/generate.controller.js';
 import { createManualPaper } from '../controllers/manual-paper.controller.js';
 import { handleUploadMiddleware } from '../middlewares/upload.middleware.js';
 import { aiLimiter, defaultLimiter } from '../middlewares/rate-limit.middleware.js';
@@ -45,6 +45,18 @@ router.post('/index-questions', aiLimiter, indexPaperQuestions);
 
 // POST /api/papers/:jobId/generate   (step 2: notes-grounded generation from the posted blueprint + slotUnitMap)
 router.post('/:jobId/generate', aiLimiter, generatePaper);
+
+// POST /api/papers/:jobId/regenerate-slot  (Phase 5 review: regenerate ONE blueprint slot; other slots untouched)
+router.post('/:jobId/regenerate-slot', aiLimiter, regenerateSlot);
+
+// POST /api/papers/:jobId/generate-answer  (Phase 6 answer key: regenerate the ANSWERS of ONE question; the question is frozen)
+router.post('/:jobId/generate-answer', aiLimiter, generateAnswer);
+
+// POST /api/papers/:jobId/cancel           (Phase 2 — M7 cancel active generation)
+router.post('/:jobId/cancel', defaultLimiter, cancelGeneration);
+
+// GET  /api/papers/:jobId/stream     (Phase 2 — M4 SSE progress stream)
+router.get('/:jobId/stream', defaultLimiter, streamPaperJob);
 
 // GET  /api/papers/:jobId/status     (per-slot progress)
 router.get('/:jobId/status', defaultLimiter, jobStatus);

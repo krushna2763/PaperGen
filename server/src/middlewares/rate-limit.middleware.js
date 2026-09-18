@@ -22,7 +22,7 @@ import { env } from '../config/env.js';
  */
 
 const limiterOptions = (limit, message) => ({
-  windowMs: 60 * 1000,
+  windowMs: env.RATE_LIMIT_WINDOW_MS,
   limit,
   standardHeaders: 'draft-7',
   legacyHeaders: false,

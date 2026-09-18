@@ -14,9 +14,10 @@ import shortAnswer from './short-answer.js';
 import longAnswer from './long-answer.js';
 import matchType from './match.js';
 import differenceBetween from './difference-between.js';
+import imageBased from './image-based.js';
 
 /** Registration order = display order in the teacher UI. */
-export const TYPES = [mcq, fillBlank, trueFalse, shortAnswer, longAnswer, matchType, differenceBetween];
+export const TYPES = [mcq, fillBlank, trueFalse, shortAnswer, longAnswer, matchType, differenceBetween, imageBased];
 
 /** id → definition. Duplicate ids fail fast at boot. */
 const byId = new Map();
@@ -28,12 +29,18 @@ for (const def of TYPES) {
 }
 
 // ─── One-time structural validation of every definition (fail fast at boot) ──
-const REQUIRED_KEYS = ['id', 'label', 'blueprintType', 'itemsIndependent', 'optionMode', 'marksMode', 'countKey', 'countMin', 'fields'];
+const REQUIRED_KEYS = ['id', 'label', 'blueprintType', 'itemsIndependent', 'optionMode', 'marksMode', 'countKey', 'countMin', 'fields', 'answerShape'];
+// The answer shape a type's items carry, declared alongside its field
+// constraints so adding a type stays one file (task §"SCHEMA").
+const ANSWER_SHAPES = new Set(['option', 'word', 'boolean', 'text', 'pairs', 'points']);
 for (const def of TYPES) {
   for (const key of REQUIRED_KEYS) {
     if (def[key] === undefined) {
       throw new Error(`[question-types] definition "${def.id || '?'}" is missing required key "${key}".`);
     }
+  }
+  if (!ANSWER_SHAPES.has(def.answerShape)) {
+    throw new Error(`[question-types] "${def.id}" answerShape must be one of ${[...ANSWER_SHAPES].join('|')}.`);
   }
   if (typeof def.itemsIndependent !== 'boolean') {
     throw new Error(`[question-types] "${def.id}" itemsIndependent must be a boolean.`);
@@ -63,6 +70,27 @@ export function hasType(id) {
   return byId.has(String(id || '').trim());
 }
 
+/** blueprintType → definition (the pipeline works in blueprintType, not id). */
+const byBlueprintType = new Map(TYPES.map((d) => [d.blueprintType, d]));
+
+/**
+ * The answer shape for a pipeline (blueprint) question type. Registry types
+ * declare their own; types outside the registry (PASSAGE, INTERNAL_CHOICE, …)
+ * fall back to free 'text' so the answer field is still produced and checked.
+ * @param {string} blueprintType
+ * @returns {'option'|'word'|'boolean'|'text'|'pairs'|'points'}
+ */
+export function answerShapeFor(blueprintType) {
+  const t = String(blueprintType || '').trim().toUpperCase();
+  const def = byBlueprintType.get(t);
+  if (def) return def.answerShape;
+  if (t === 'TRUE_FALSE') return 'boolean';
+  if (t === 'FILL_IN_THE_BLANK') return 'word';
+  if (t === 'MCQ') return 'option';
+  if (t === 'MATCH_THE_FOLLOWING') return 'pairs';
+  return 'text';
+}
+
 /**
  * Client-facing serialization (GET /api/question-types): everything the
  * QuestionBuilder needs to render fields from the registry — no server-internal
@@ -80,9 +108,10 @@ export function listForClient() {
     countLabel: d.countLabel,
     countMin: d.countMin,
     fields: d.fields,
+    answerShape: d.answerShape,
     defaultInstruction: d.defaultInstruction ?? null,
     generatorHint: d.generatorHint ?? null,
   }));
 }
 
-export default { TYPES, getDefinition, hasType, listForClient };
+export default { TYPES, getDefinition, hasType, answerShapeFor, listForClient };

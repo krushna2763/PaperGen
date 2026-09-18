@@ -10,6 +10,7 @@ export default {
   itemsIndependent: true,
   optionBearer: false,
   optionMode: 'none',
+  answerShape: 'boolean',
   marksMode: 'perItem',
   countKey: 'itemCount',
   countLabel: 'Statements',

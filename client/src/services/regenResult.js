@@ -26,4 +26,36 @@ export function mergeRegeneratedResult(prev, data) {
   };
 }
 
-export default { mergeRegeneratedResult };
+/**
+ * Phase 5 review: merge ONE regenerated question into the current result.
+ *
+ * `POST /papers/:jobId/regenerate-slot` returns a single question for one
+ * blueprint slot; every other question on the paper — including teacher-edited
+ * ones — must stay EXACTLY as it is. This splice replaces only the entry whose
+ * slotIndex matches (questions without a slotIndex fall back to their list
+ * position) and drops any rejected entry for the slot. Returns `prev`
+ * unchanged when there is nothing to merge.
+ *
+ * @param {Object|null} prev - current result ({ questions, rejected, ... })
+ * @param {Object|null} question - the regenerated question
+ * @param {number} slotIndex - the slot the question fills
+ * @returns {Object} new result object (prev untouched)
+ */
+export function mergeRegeneratedSlot(prev, question, slotIndex) {
+  if (!prev || !Array.isArray(prev.questions) || !question || !Number.isInteger(slotIndex)) return prev;
+  let replaced = false;
+  const questions = prev.questions.map((qq, i) => {
+    const idx = Number.isInteger(qq?.slotIndex) ? qq.slotIndex : i;
+    if (idx !== slotIndex) return qq;
+    replaced = true;
+    return { ...question, slotIndex };
+  });
+  if (!replaced) questions.push({ ...question, slotIndex });
+  return {
+    ...prev,
+    questions,
+    rejected: (prev.rejected || []).filter((r) => r?.slotIndex !== slotIndex),
+  };
+}
+
+export default { mergeRegeneratedResult, mergeRegeneratedSlot };

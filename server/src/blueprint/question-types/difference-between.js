@@ -9,6 +9,7 @@ export default {
   itemsIndependent: true,
   optionBearer: false,
   optionMode: 'none',
+  answerShape: 'points',
   marksMode: 'perItem',
   countKey: 'itemCount',
   countLabel: 'Items',

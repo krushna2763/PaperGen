@@ -1,12 +1,23 @@
 import { useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react';
-import { paperService, kbService } from './services/api.js';
+import { paperService, kbService, libraryService } from './services/api.js';
+import AppShell from './components/AppShell.jsx';
+import Dashboard from './components/Dashboard.jsx';
+import MyPapers from './components/MyPapers.jsx';
+import KnowledgeBase from './components/KnowledgeBase.jsx';
+import SchoolTemplates from './components/SchoolTemplates.jsx';
+import SettingsView from './components/SettingsView.jsx';
+import AnswerKeyScreen from './components/AnswerKeyScreen.jsx';
 import ConfirmScreen from './components/ConfirmScreen.jsx';
-import ModeChooser from './components/ModeChooser.jsx';
+import GenerateChooser from './components/GenerateChooser.jsx';
+import GeneratePaperA from './components/GeneratePaperA.jsx';
 import PaperDetails from './components/PaperDetails.jsx';
 import QuestionBuilder from './components/QuestionBuilder.jsx';
 import ReviewPaper from './components/ReviewPaper.jsx';
+import GenerationProgressDrawer from './components/GenerationProgressDrawer.jsx';
+import { useGenerationSSE } from './services/useGenerationSSE.js';
+import { saveActiveJob, getActiveJob, clearActiveJob } from './services/jobRecovery.js';
 import { buildPaperModel, paginatePaper } from './services/paperLayout.js';
-import { createPaperPdfBlob, paperFileName } from './services/paperPdf.js';
+import { createPaperPdfBlob, paperFileName, createAnswerKeyPdfBlob, answerKeyFileName } from './services/paperPdf.js';
 import { DEFAULT_PAPER_FORMAT, PAPER_LAYOUT, optionLabels, templateToFormat } from './services/paperTemplate.js';
 import {
   paperFingerprints,
@@ -19,17 +30,11 @@ import { mergeRegeneratedResult } from './services/regenResult.js';
 ───────────────────────────────────────────────────────────── */
 const CLASS_OPTIONS = Array.from({ length: 12 }, (_, i) => String(i + 1));
 const DEFAULT_SUBJECT = 'General';
-const ZOOM_LEVELS = [75, 100, 125, 150];
 const MAX_FILE_SIZE = 15 * 1024 * 1024; // 15 MB
 
 /* ─────────────────────────────────────────────────────────────
    Small helpers
 ───────────────────────────────────────────────────────────── */
-function formatSize(bytes) {
-  if (!bytes) return '';
-  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-}
 
 /**
  * Best-effort subject derived from the uploaded file name (no UI field).
@@ -73,122 +78,13 @@ const Icon = ({ size = 20, className = '', strokeWidth = 2, children }) => (
   </svg>
 );
 
-const BookOpenIcon = (p) => (
-  <Icon {...p}>
-    <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
-    <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
-  </Icon>
-);
-const HelpCircleIcon = (p) => (
-  <Icon {...p}>
-    <circle cx="12" cy="12" r="10" />
-    <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
-    <path d="M12 17h.01" />
-  </Icon>
-);
-const FileTextIcon = (p) => (
-  <Icon {...p}>
-    <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
-    <polyline points="14 2 14 8 20 8" />
-    <line x1="16" y1="13" x2="8" y2="13" />
-    <line x1="16" y1="17" x2="8" y2="17" />
-  </Icon>
-);
-const CloudUploadIcon = (p) => (
-  <Icon {...p}>
-    <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
-    <path d="M12 13v8" />
-    <path d="m8 17 4-4 4 4" />
-  </Icon>
-);
-const TrashIcon = (p) => (
-  <Icon {...p}>
-    <path d="M3 6h18" />
-    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-    <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-    <line x1="10" y1="11" x2="10" y2="17" />
-    <line x1="14" y1="11" x2="14" y2="17" />
-  </Icon>
-);
-const SlidersIcon = (p) => (
-  <Icon {...p}>
-    <line x1="21" y1="4" x2="14" y2="4" />
-    <line x1="10" y1="4" x2="3" y2="4" />
-    <line x1="21" y1="12" x2="12" y2="12" />
-    <line x1="8" y1="12" x2="3" y2="12" />
-    <line x1="21" y1="20" x2="16" y2="20" />
-    <line x1="12" y1="20" x2="3" y2="20" />
-    <line x1="14" y1="2" x2="14" y2="6" />
-    <line x1="8" y1="10" x2="8" y2="14" />
-    <line x1="16" y1="18" x2="16" y2="22" />
-  </Icon>
-);
-const SparklesIcon = (p) => (
-  <Icon {...p}>
-    <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z" />
-    <path d="M20 3v4" />
-    <path d="M22 5h-4" />
-    <path d="M4 17v2" />
-    <path d="M5 18H3" />
-  </Icon>
-);
 const CheckCircleIcon = (p) => (
   <Icon {...p}>
     <circle cx="12" cy="12" r="10" />
     <path d="m9 12 2 2 4-4" />
   </Icon>
 );
-const EyeIcon = (p) => (
-  <Icon {...p}>
-    <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" />
-    <circle cx="12" cy="12" r="3" />
-  </Icon>
-);
-const DownloadIcon = (p) => (
-  <Icon {...p}>
-    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-    <path d="m7 10 5 5 5-5" />
-    <path d="M12 15V3" />
-  </Icon>
-);
-const PrinterIcon = (p) => (
-  <Icon {...p}>
-    <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
-    <rect x="6" y="14" width="12" height="8" />
-  </Icon>
-);
-const ChevronUpIcon = (p) => (
-  <Icon {...p}>
-    <path d="m18 15-6-6-6 6" />
-  </Icon>
-);
-const ChevronDownIcon = (p) => (
-  <Icon {...p}>
-    <path d="m6 9 6 6 6-6" />
-  </Icon>
-);
-const ZoomInIcon = (p) => (
-  <Icon {...p}>
-    <circle cx="11" cy="11" r="8" />
-    <path d="m21 21-4.3-4.3" />
-    <path d="M11 8v6" />
-    <path d="M8 11h6" />
-  </Icon>
-);
-const ZoomOutIcon = (p) => (
-  <Icon {...p}>
-    <circle cx="11" cy="11" r="8" />
-    <path d="m21 21-4.3-4.3" />
-    <path d="M8 11h6" />
-  </Icon>
-);
-const MoreIcon = (p) => (
-  <Icon {...p}>
-    <circle cx="12" cy="5" r="1" />
-    <circle cx="12" cy="12" r="1" />
-    <circle cx="12" cy="19" r="1" />
-  </Icon>
-);
+
 const AlertIcon = (p) => (
   <Icon {...p}>
     <circle cx="12" cy="12" r="10" />
@@ -197,31 +93,6 @@ const AlertIcon = (p) => (
   </Icon>
 );
 
-/* ─────────────────────────────────────────────────────────────
-   Small presentational components
-───────────────────────────────────────────────────────────── */
-const Card = ({ children, className = '' }) => (
-  <div className={`bg-white rounded-xl border border-gray-200 shadow-sm ${className}`}>{children}</div>
-);
-
-const CardHeader = ({ icon, title }) => (
-  <div className="flex items-center gap-2.5 px-5 pt-5">
-    {icon}
-    <h2 className="text-[15px] font-semibold text-gray-900">{title}</h2>
-  </div>
-);
-
-const ToolbarButton = ({ onClick, title, disabled, children }) => (
-  <button
-    type="button"
-    onClick={onClick}
-    title={title}
-    disabled={disabled}
-    className="h-7 w-7 flex items-center justify-center rounded text-gray-300 hover:bg-gray-700 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-  >
-    {children}
-  </button>
-);
 
 /* ─────────────────────────────────────────────────────────────
    Standalone paper HTML (used by View Full PDF / Download PDF)
@@ -342,130 +213,7 @@ function loadStoredFormat() {
   return { ...DEFAULT_PAPER_FORMAT };
 }
 
-/* ─────────────────────────────────────────────────────────────
-   Paper preview renderers (screen = same model as the real PDF)
-───────────────────────────────────────────────────────────── */
-const paperCss = { fontFamily: PAPER_LAYOUT.serifCss, fontSize: 12, lineHeight: 1.72, color: '#111', minHeight: '100%' };
-const paperStyles = {
-  headerLine: { textAlign: 'center', fontWeight: 700, lineHeight: 1.24, margin: 0 },
-  timeRow: { display: 'flex', justifyContent: 'space-between', marginTop: 16, lineHeight: 1.24 },
-  giTitle: { fontWeight: 700, marginTop: 16, lineHeight: 1.24 },
-  gi: { display: 'flex', gap: 6, lineHeight: 1.24 },
-  giNum: { width: 28, textAlign: 'right', flexShrink: 0 },
-  sectionTitle: { textAlign: 'center', fontWeight: 700, marginTop: 24, marginBottom: 4 },
-  q: { display: 'flex', marginTop: 19, alignItems: 'flex-start' },
-  qNum: { width: 26, flexShrink: 0 },
-  qText: { flex: 1, textAlign: 'justify' },
-  qMarks: { width: 42, textAlign: 'right', flexShrink: 0, marginLeft: 8 },
-  passage: { textAlign: 'justify', marginTop: 4, marginBottom: 4, marginLeft: 26 },
-  part: { display: 'flex', gap: 6 },
-  partLabel: { width: 24, flexShrink: 0 },
-  opt: { display: 'flex', gap: 6, marginLeft: 44 },
-  optLabel: { width: 22, flexShrink: 0 },
-  pageNum: { textAlign: 'center', marginTop: 26, fontSize: 11, color: '#333' },
-};
 
-function PaperHeader({ model }) {
-  return (
-    <div>
-      {model.header.titleLines.map((line, i) => (
-        <p key={i} style={paperStyles.headerLine}>
-          {line.text}
-        </p>
-      ))}
-      {(model.header.timeAllowed || model.header.maximumMarks) && (
-        <div style={paperStyles.timeRow}>
-          <span>{model.header.timeAllowed ? `Time: ${model.header.timeAllowed}` : ''}</span>
-          <span>{model.header.maximumMarks ? `Maximum Marks: ${model.header.maximumMarks}` : ''}</span>
-        </div>
-      )}
-      {model.instructions.length > 0 && (
-        <>
-          <p style={paperStyles.giTitle}>{model.instructionsHeading || 'General Instructions :'}</p>
-          {model.instructions.map((inst, i) => (
-            <div key={i} style={paperStyles.gi}>
-              <span style={paperStyles.giNum}>{i + 1}.</span>
-              <span>{inst}</span>
-            </div>
-          ))}
-        </>
-      )}
-    </div>
-  );
-}
-
-function OptionRow({ opt, oi, count, sub = false, style: labelStyle = 'roman' }) {
-  return (
-    <div style={sub ? { ...paperStyles.opt, marginLeft: 72 } : paperStyles.opt}>
-      <span style={paperStyles.optLabel}>{optionLabels(count, labelStyle)[oi]}</span>
-      <span>{opt}</span>
-    </div>
-  );
-}
-
-function PaperQuestion({ q, optionStyle = 'roman' }) {
-  return (
-    <div>
-      <div style={paperStyles.q}>
-        <span style={paperStyles.qNum}>{q.numberText}</span>
-        <span style={paperStyles.qText}>{q.text}</span>
-        {q.marksText && <span style={paperStyles.qMarks}>{q.marksText}</span>}
-      </div>
-      {q.passage && <div style={paperStyles.passage}>{q.passage}</div>}
-      {q.subParts.map((part, i) => (
-        <div key={`part-${i}`}>
-          <div style={paperStyles.part}>
-            <span style={paperStyles.partLabel}>{part.label}</span>
-            <span>{part.text}</span>
-          </div>
-          {(part.options || []).map((opt, oi) => (
-            <OptionRow key={`popt-${oi}`} opt={opt} oi={oi} count={part.options.length} sub style={optionStyle} />
-          ))}
-        </div>
-      ))}
-      {q.options.map((opt, i) => (
-        <OptionRow key={`opt-${i}`} opt={opt} oi={i} count={q.options.length} style={optionStyle} />
-      ))}
-      {q.columns && q.columns.left.length > 0 && q.columns.right.length > 0 && (
-        <div style={{ display: 'flex', gap: 20, marginLeft: 26, marginTop: 4 }}>
-          <div style={{ flex: 1 }}>
-            {q.columns.left.map((c, i) => (
-              <div key={`cl-${i}`} style={paperStyles.part}>
-                <span style={paperStyles.partLabel}>{String.fromCharCode(97 + (i % 26))})</span>
-                <span>{c}</span>
-              </div>
-            ))}
-          </div>
-          <div style={{ flex: 1 }}>
-            {q.columns.right.map((c, i) => (
-              <div key={`cr-${i}`} style={paperStyles.part}>
-                <span style={paperStyles.partLabel}>{i + 1}.</span>
-                <span>{c}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-      {q.choices.map((choice, ci) => (
-        <div key={`choice-${ci}`}>
-          <div style={{ ...paperStyles.part, marginLeft: 24 }}>
-            <span style={paperStyles.partLabel}>{choice.label}</span>
-            <span>{choice.text}</span>
-          </div>
-          {(choice.subParts || []).map((sp, j) => (
-            <div key={`csp-${j}`} style={paperStyles.part}>
-              <span style={paperStyles.partLabel}>{sp.label}</span>
-              <span>{sp.text}</span>
-            </div>
-          ))}
-          {ci < q.choices.length - 1 && (
-            <div style={{ margin: '2px 0 2px 48px', fontStyle: 'italic' }}>OR</div>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
 
 /* ─────────────────────────────────────────────────────────────
    App
@@ -481,10 +229,7 @@ export default function App() {
   // When present, generation preserves the reference structure (types, marks,
   // item counts, sections) and only regenerates CONTENT.
   const [blueprint, setBlueprint] = useState(null);
-  // UNIVERSAL visual template of the uploaded reference (server template analyzer).
-  // Auto-fills the paper header/instructions format below; blueprint ≠ template
-  // (structure vs visual) — they stay separate states.
-  const [template, setTemplate] = useState(null);
+  const [_template, setTemplate] = useState(null);
 
   // Two-step flow: choosing → (Mode A) idle → uploading → analyzing → confirm → generating → review
   //                          → (Mode B) details → building → confirm → generating → review
@@ -495,13 +240,118 @@ export default function App() {
   const [manualMeta, setManualMeta] = useState({ class: '10', subject: '' });
   const [jobId, setJobId] = useState(null);
   const [availableUnits, setAvailableUnits] = useState([]);
-  const [slotProgress, setSlotProgress] = useState([]);
+  const [_slotProgress, setSlotProgress] = useState([]);
   const [notesMsg, setNotesMsg] = useState('');
+  const [sessionNotesUploads, setSessionNotesUploads] = useState([]);
   const [progress, setProgress] = useState('');
   const [elapsed, setElapsed] = useState(0);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
   const [initialAssign, setInitialAssign] = useState(null); // Mode B handoff
+  const [activeJobId, setActiveJobId] = useState(null);
+  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+
+  const [view, setView] = useState('dashboard');
+  const [answerKeyPaper, setAnswerKeyPaper] = useState(null);
+
+  const [sseState, { cancel }] = useGenerationSSE(activeJobId, {
+    blueprint,
+    onComplete: async () => {
+      clearActiveJob();
+      if (!activeJobId) return;
+      try {
+        const statusRes = await paperService.status(activeJobId);
+        if (statusRes && statusRes.result) {
+          setResult(statusRes.result);
+          setGeneratedFingerprint(paperFingerprints(blueprint));
+          setPhase('review');
+          setView('generate');
+          setPageIndex(0);
+          setZoom(100);
+          try {
+            libraryService.create({
+              title: `${format?.examTitle || 'Annual Examination'} - ${subject || 'General'}`,
+              class: settings.class || '10',
+              subject: subject || 'General',
+              totalMarks: blueprint?.totalMarks || 80,
+              source: mode === 'B' ? 'manual' : 'reference',
+              status: 'generated',
+              blueprint,
+              questions: statusRes.result.questions || [],
+              slotUnitMap: {},
+              rejectedCount: statusRes.result.rejected?.length || 0,
+            }).catch(() => {});
+          } catch {
+            /* ignore background archiving */
+          }
+        } else {
+          setError('Generation completed, but paper result was not found. Please try again.');
+          setPhase('confirm');
+        }
+      } catch (err) {
+        setError(err?.response?.data?.message || err?.message || 'Failed to fetch generated paper.');
+        setPhase('confirm');
+      }
+    },
+    onError: (err) => {
+      clearActiveJob();
+      const msg = err?.message || 'Generation failed. Please review errors and try again.';
+      setError(msg);
+      setPhase('confirm');
+    },
+    onCancelled: (data) => {
+      clearActiveJob();
+      setError(data?.message || 'Paper generation was cancelled.');
+      setPhase('confirm');
+    },
+  });
+
+  // Phase 2 — Milestone M7: Browser Refresh / Job Recovery
+  useEffect(() => {
+    const recoveredJobId = getActiveJob();
+    if (!recoveredJobId) return;
+
+    let isMounted = true;
+    paperService.status(recoveredJobId)
+      .then((statusRes) => {
+        if (!isMounted) return;
+        if (statusRes.status === 'running' || statusRes.status === 'queued') {
+          setActiveJobId(recoveredJobId);
+          setJobId(recoveredJobId);
+          setIsDrawerOpen(true);
+          setPhase('generating');
+          setView('generate');
+        } else if (statusRes.status === 'completed') {
+          if (statusRes.result) {
+            setResult(statusRes.result);
+            setPhase('review');
+            setView('generate');
+            setPageIndex(0);
+            setZoom(100);
+          }
+          clearActiveJob();
+        } else if (statusRes.status === 'failed') {
+          setError(statusRes.error?.message || statusRes.message || 'Previous generation job failed.');
+          clearActiveJob();
+        } else if (statusRes.status === 'cancelled') {
+          setError('Previous generation job was cancelled.');
+          clearActiveJob();
+        } else {
+          clearActiveJob();
+        }
+      })
+      .catch((err) => {
+        if (!isMounted) return;
+        clearActiveJob();
+        if (err?.response?.status === 404) {
+          setError('Previous generation job expired or not found.');
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   // Mode B only: the structure stays editable after generation, so the
   // generated snapshot is captured once and compared to the current blueprint
@@ -512,7 +362,7 @@ export default function App() {
 
   const [pageIndex, setPageIndex] = useState(0);
   const [zoom, setZoom] = useState(100);
-  const [pageH, setPageH] = useState(900);
+  const [_pageH, setPageH] = useState(900);
 
   // Mode B review + download: stale slots live here so both the review screen
   // and the download warning consume the same set.
@@ -570,11 +420,14 @@ export default function App() {
     setGeneratedFingerprint(null);
     setSlotProgress([]);
     setNotesMsg('');
+    setSessionNotesUploads([]);
     setProgress('');
     setError(null);
     setSubject(DEFAULT_SUBJECT);
     setPageIndex(0);
     setZoom(100);
+    setActiveJobId(null);
+    setIsDrawerOpen(false);
   };
 
   const chooseMode = (m) => {
@@ -634,9 +487,9 @@ export default function App() {
     return () => clearInterval(id);
   }, [busy]);
 
-  // Per-slot generation progress (server job store) — best-effort polling.
+  // Per-slot generation progress (server job store) — polling fallback only when SSE is not active.
   useEffect(() => {
-    if (phase !== 'generating' || !jobId) return;
+    if (phase !== 'generating' || !jobId || activeJobId) return;
     let stopped = false;
     const poll = async () => {
       try {
@@ -652,7 +505,7 @@ export default function App() {
       stopped = true;
       clearInterval(id);
     };
-  }, [phase, jobId]);
+  }, [phase, jobId, activeJobId]);
 
   // Measure the current page height so zoom scaling keeps the wrapper sized correctly
   useLayoutEffect(() => {
@@ -854,15 +707,25 @@ export default function App() {
         subject,
         difficulty: settings.difficulty,
         slotUnitMap,
+        async: true,
       });
-      setResult(genRes.data);
-      // Snapshot the generated structure AFTER the response lands, so the
-      // fingerprint reflects the ACTUAL generated paper — not an empty state
-      // taken at handleManualCreated time.
-      setGeneratedFingerprint(paperFingerprints(blueprint));
-      setPhase('review');
-      setPageIndex(0);
-      setZoom(100);
+
+      // Synchronous generation fallback (if server returned 200 OK directly with data)
+      if (genRes?.data?.questions) {
+        setResult(genRes.data);
+        setGeneratedFingerprint(paperFingerprints(blueprint));
+        setPhase('review');
+        setPageIndex(0);
+        setZoom(100);
+        setIsDrawerOpen(false);
+        return;
+      }
+
+      // Async generation: Server returned 202 with jobId
+      const serverJobId = genRes?.jobId || jobId;
+      saveActiveJob(serverJobId);
+      setActiveJobId(serverJobId);
+      setIsDrawerOpen(true);
     } catch (err) {
       const data = err?.response?.data;
       // The 422 body carries `errors: [{ slot, message }]`. Show each slot with
@@ -880,6 +743,7 @@ export default function App() {
       const detail = lines.length > 0 ? `\n• ${lines.join('\n• ')}` : '';
       setError((data?.message || err?.message || 'Generation failed. Please try again.') + detail);
       setPhase('confirm');
+      setIsDrawerOpen(false);
     } finally {
       setProgress('');
       setSlotProgress([]);
@@ -934,6 +798,17 @@ export default function App() {
           ? `"${unit}" — these exact notes are already indexed (${d.chunkCount ?? '?'} chunks).`
           : `"${unit}" — indexed ${d.indexedCount ?? d.chunkCount ?? '?'} note chunk(s) for Class ${cls} · ${subj}.`
       );
+      // Track this upload in the session so GeneratePaperA can show it
+      setSessionNotesUploads((prev) => [
+        ...prev,
+        {
+          id: `${unit}-${Date.now()}`,
+          fileName: newFile.name,
+          unit,
+          chunkCount: d.indexedCount ?? d.chunkCount ?? null,
+          reused: !!d.reused,
+        },
+      ]);
       const list = await kbService.listUnits({ class: cls, subject: subj });
       setAvailableUnits(Array.isArray(list.data) ? list.data : []);
     } catch (err) {
@@ -1009,58 +884,179 @@ export default function App() {
     }, 150);
   };
 
-  const zoomIndex = ZOOM_LEVELS.indexOf(zoom);
 
-  const fieldInputClass =
-    'w-full h-10 rounded-lg border border-gray-300 bg-white px-3 text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors';
+  const handleOpenPaper = (paper) => {
+    if (paper?.questions?.length > 0) {
+      setBlueprint(paper.blueprint || null);
+      setResult({ questions: paper.questions, rejected: [] });
+      setSubject(paper.subject || DEFAULT_SUBJECT);
+      setSettings((s) => ({ ...s, class: paper.class || '10' }));
+      setMode(paper.source === 'manual' ? 'B' : 'A');
+      setPhase('review');
+      setView('generate');
+      setPageIndex(0);
+      setZoom(100);
+    } else {
+      setView('papers');
+    }
+  };
+
+  const handleDownloadLibraryPaper = async (paper) => {
+    if (!paper?.questions?.length) return;
+    try {
+      const blob = await createPaperPdfBlob({
+        questions: paper.questions,
+        blueprint: paper.blueprint,
+        settings: { class: paper.class || '10' },
+        subject: paper.subject || DEFAULT_SUBJECT,
+        format,
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = paperFileName(paper.subject || DEFAULT_SUBJECT, { class: paper.class || '10' });
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 100);
+    } catch (e) {
+      console.error('Failed to download paper from library', e);
+    }
+  };
+
+  const handleDownloadAnswerKey = async (paper) => {
+    if (!paper?.questions?.length) return;
+    try {
+      const blob = await createAnswerKeyPdfBlob({
+        questions: paper.questions,
+        blueprint: paper.blueprint,
+        settings: { class: paper.class || '10' },
+        subject: paper.subject || DEFAULT_SUBJECT,
+        format,
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = answerKeyFileName(paper.subject || DEFAULT_SUBJECT, { class: paper.class || '10' });
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 100);
+    } catch (e) {
+      console.error('Failed to download answer key', e);
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-[#f8f9fa]">
-      {/* ── Staleness review screen (Mode B): rendered where the
-          'Generated Question Paper' panel lives, replacing it when a
-          Mode B paper is in review. Mode A keeps the existing path. ── */}
-      <header className="bg-white border-b border-gray-200">
-        <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-indigo-200 bg-indigo-50">
-              <BookOpenIcon className="text-indigo-600" size={19} />
+    <AppShell
+      view={view}
+      wide={view === 'generate'}
+      onNavigate={(targetView) => {
+        if (targetView === 'generate' && view !== 'generate') {
+          if (!mode) {
+            setPhase('choosing');
+          }
+        }
+        setView(targetView);
+      }}
+    >
+      {view === 'dashboard' && (
+        <Dashboard
+          onStartModeA={() => {
+            chooseMode('A');
+            setView('generate');
+          }}
+          onStartModeB={() => {
+            chooseMode('B');
+            setView('generate');
+          }}
+          onNavigate={(target) => {
+            if (target === 'generate-a') {
+              chooseMode('A');
+              setView('generate');
+            } else if (target === 'generate-b') {
+              chooseMode('B');
+              setView('generate');
+            } else {
+              setView(target);
+            }
+          }}
+          onOpenPaper={handleOpenPaper}
+        />
+      )}
+
+      {view === 'generate' && phase === 'choosing' && (
+        <GenerateChooser
+          onSelectA={() => chooseMode('A')}
+          onSelectB={() => chooseMode('B')}
+          onManageNotes={() => setView('kb')}
+        />
+      )}
+
+      {view === 'generate' && phase !== 'choosing' && (
+        <div className="w-full space-y-4">
+          {/* ── Mode breadcrumb bar ── */}
+          {mode && (
+            <div className="flex items-center justify-between bg-white rounded-xl border border-gray-200 px-4 py-3 shadow-xs">
+              <button
+                type="button"
+                onClick={resetToModeChoice}
+                className="inline-flex items-center gap-1.5 text-xs font-semibold text-gray-600 hover:text-blue-600 transition-colors"
+              >
+                <span>← Change generation mode</span>
+              </button>
+              <div className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-blue-600" />
+                <span className="text-xs font-semibold text-gray-800">
+                  {mode === 'A' ? 'Mode A: Previous Year Paper' : 'Mode B: Custom Question Paper'}
+                </span>
+              </div>
             </div>
-            <div>
-              <p className="text-[15px] font-bold text-gray-900 leading-tight">PaperGen AI</p>
-              <p className="text-xs text-gray-500 leading-tight">AI Question Paper Generator</p>
-            </div>
-          </div>
-          <a href="#" className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-700 transition-colors">
-            <span className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-gray-300">
-              <HelpCircleIcon size={15} />
-            </span>
-            Help
-          </a>
-        </div>
-      </header>
+          )}
 
-      {/* ── Main ───────────────────────────────────────────── */}
-      <main className="max-w-6xl mx-auto px-6 py-8">
-        <div className="text-center mb-8">
-          <h1 className="text-2xl font-bold text-gray-900">Create New Question Paper</h1>
-          <p className="mt-2 text-gray-500">
-            Upload a previous-year question paper and generate a new question paper instantly.
-          </p>
-        </div>
+          {/* ── Mode A: full integrated UI from GeneratePaperA component ── */}
+          {mode === 'A' && !showConfirm && !showReview && (
+            <GeneratePaperA
+              file={file}
+              dragOver={dragOver}
+              fileInputRef={fileInputRef}
+              onPickFile={() => fileInputRef.current?.click()}
+              onFileInput={(e) => { selectFile(e.target.files?.[0]); e.target.value = ''; }}
+              onDrop={handleDrop}
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onClearFile={clearFile}
+              onAnalyze={handleAnalyze}
+              analyzing={analyzing}
+              generating={generating}
+              progress={progress}
+              elapsed={elapsed}
+              blueprint={blueprint}
+              format={format}
+              classValue={settings.class}
+              onClassChange={(v) => setSettings((s) => ({ ...s, class: v }))}
+              classOptions={CLASS_OPTIONS}
+              subjectValue={subject}
+              onSubjectChange={setSubject}
+              difficulty={settings.difficulty}
+              onDifficultyChange={(d) => setSettings((s) => ({ ...s, difficulty: d }))}
+              units={availableUnits}
+              sessionNotesUploads={sessionNotesUploads}
+              onAddNotes={handleAddNotes}
+              notesMsg={notesMsg}
+              onGenerate={handleGenerate}
+              error={error}
+            />
+          )}
 
-        <div className="grid grid-cols-12 gap-6 items-start">
-          {/* ── Left column ────────────────────────────────── */}
-          <div className="col-span-12 lg:col-span-5 space-y-6">
-            {/* Entry point: the mode chooser owns the left column until a mode
-                is picked. Picking A routes to the upload flow below; picking B
-                routes into the manual builder (details → building). */}
-            {phase === 'choosing' && (
-              <ModeChooser onSelect={chooseMode} />
-            )}
-
-            {/* Mode B: details → builder (upload flow hidden) */}
-            {modeBActive && (
-              <>
+          {/* ── Mode B: details → builder ── */}
+          {modeBActive && (
+            <div className="w-full space-y-6">
+              <div className="w-full min-w-0 space-y-6">
                 {phase === 'details' && (
                   <PaperDetails
                     meta={manualMeta}
@@ -1076,464 +1072,126 @@ export default function App() {
                     onCancel={() => setPhase('details')}
                   />
                 )}
-              </>
-            )}
+              </div>
+            </div>
+          )}
 
-            {mode === 'A' && (
-            <>
-            {/* 1. Upload */}
-            <Card>
-              <CardHeader icon={<FileTextIcon className="text-gray-500" size={19} />} title="1. Upload Previous Year Paper" />
-              <p className="px-5 pt-1.5 text-[13px] text-gray-500">
-                Upload a PDF file of the previous year question paper to get started.
+          {/* ── Confirm Screen (Mode B after builder, Mode A after analysis) ── */}
+          {showConfirm && (
+            <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-xs">
+              <div className="flex items-center gap-2.5 mb-4">
+                <CheckCircleIcon className="text-blue-600" size={19} />
+                <h2 className="text-[15px] font-semibold text-gray-900">Review Blueprint &amp; Assign Units</h2>
+              </div>
+              {error && (
+                <div className="flex items-start gap-2.5 bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm mb-4">
+                  <AlertIcon size={17} className="shrink-0 mt-0.5" />
+                  <span className="whitespace-pre-line">{error}</span>
+                </div>
+              )}
+              <p className="mb-2 text-[12px] text-gray-500">
+                Notes for this paper are filed under <span className="font-medium text-gray-700">Class {settings.class} · {subject || '(set a subject)'}</span>.
+                Upload notes for the same class &amp; subject or they will not appear.
               </p>
-
-              <div className="p-5">
-                {!file ? (
-                  <div
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => fileInputRef.current?.click()}
-                    onKeyDown={(e) => e.key === 'Enter' && fileInputRef.current?.click()}
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      setDragOver(true);
-                    }}
-                    onDragLeave={() => setDragOver(false)}
-                    onDrop={handleDrop}
-                    className={`border-2 border-dashed rounded-xl flex flex-col items-center justify-center py-10 px-6 text-center cursor-pointer transition-colors ${
-                      dragOver ? 'border-blue-600 bg-blue-50' : 'border-blue-500 bg-[#f0f6ff] hover:bg-blue-50'
-                    }`}
-                  >
-                    <CloudUploadIcon className="text-blue-500" size={42} strokeWidth={1.5} />
-                    <p className="mt-3 text-[15px] font-medium text-gray-800">Drag &amp; drop your PDF here</p>
-                    <p className="mt-1 text-sm text-gray-400">or</p>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        fileInputRef.current?.click();
-                      }}
-                      className="mt-3 bg-blue-700 hover:bg-blue-800 text-white text-sm font-medium px-5 py-2 rounded-lg transition-colors"
-                    >
-                      Choose PDF
-                    </button>
-                    <p className="mt-3 text-xs text-gray-400">PDF only • Maximum 15 MB</p>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-3 border border-gray-200 rounded-lg bg-white px-3.5 py-3">
-                    <FileTextIcon className="text-red-500 shrink-0" size={20} />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-800 truncate">{file.name}</p>
-                      <p className="text-xs text-gray-500">{formatSize(file.size)}</p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={clearFile}
-                      title="Remove file"
-                      className="text-red-500 hover:text-red-600 p-1 rounded transition-colors"
-                    >
-                      <TrashIcon size={18} />
-                    </button>
-                  </div>
-                )}
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="application/pdf,.pdf"
-                  className="hidden"
-                  onChange={(e) => {
-                    selectFile(e.target.files?.[0]);
-                    e.target.value = '';
-                  }}
-                />
-              </div>
-            </Card>
-
-            {/* 2. Paper Settings */}
-            <Card>
-              <CardHeader icon={<SlidersIcon className="text-gray-500" size={19} />} title="2. Paper Settings" />
-              <div className="p-5">
-                <div className="grid grid-cols-3 gap-4">
-                  <div>
-                    <label className="block text-[13px] font-medium text-gray-700 mb-1.5">Class</label>
-                    <div className="relative">
-                      <select
-                        value={settings.class}
-                        onChange={(e) => setSettings((s) => ({ ...s, class: e.target.value }))}
-                        className={`${fieldInputClass} appearance-none pr-8`}
-                      >
-                        {CLASS_OPTIONS.map((c) => (
-                          <option key={c} value={c}>
-                            {c}
-                          </option>
-                        ))}
-                      </select>
-                      <ChevronDownIcon
-                        size={15}
-                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none"
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-[13px] font-medium text-gray-700 mb-1.5">Subject</label>
-                    <input
-                      type="text"
-                      value={subject}
-                      onChange={(e) => setSubject(e.target.value)}
-                      placeholder="e.g. Cloud Computing"
-                      className={fieldInputClass}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[13px] font-medium text-gray-700 mb-1.5">Number of Questions</label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={20}
-                      value={settings.questionCount}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setSettings((s) => ({
-                          ...s,
-                          questionCount: val === '' ? 1 : Math.min(20, Math.max(1, parseInt(val, 10) || 1)),
-                        }));
-                      }}
-                      className={fieldInputClass}
-                    />
-                  </div>
-                </div>
-
-                <p className="mt-3 text-xs text-gray-500">
-                  {blueprint
-                    ? `Reference paper detected — structure (${blueprint.totalQuestions} question${blueprint.totalQuestions === 1 ? '' : 's'}, ${blueprint.totalMarks ?? '?'} marks) is locked to the uploaded paper.`
-                    : 'You can generate between 1 to 20 questions.'}
+              {notesMsg && (
+                <p className="mb-2 rounded-md bg-emerald-50 border border-emerald-200 px-3 py-1.5 text-[12px] text-emerald-800">
+                  {notesMsg}
                 </p>
-                {template && template.header && (template.header.schoolName || template.header.examTitle) && (
-                  <p className="mt-1 text-[11.5px] text-emerald-700">
-                    Reference template detected — paper header &amp; instructions auto-filled below
-                    {template.header.schoolName ? ` from “${template.header.schoolName}”` : ''}; edit any field to override.
-                  </p>
-                )}
-
-                {/* ── Exam paper format (dynamic template) ─────────── */}
-                <div className="mt-5 border-t border-gray-100 pt-4">
-                  <div className="flex items-center justify-between">
-                    <label className="text-[13px] font-medium text-gray-700">Exam paper header &amp; format</label>
-                    <button
-                      type="button"
-                      onClick={() => setFormat({ ...DEFAULT_PAPER_FORMAT })}
-                      className="text-[12px] text-blue-700 hover:underline"
-                    >
-                      Reset to defaults
-                    </button>
-                  </div>
-                  <p className="mt-0.5 text-[11.5px] text-gray-400">
-                    Shown on the generated paper &amp; remembered for next time. Leave School blank to hide it.
-                  </p>
-                  <div className="mt-2.5 grid grid-cols-2 gap-3">
-                    <div className="col-span-2">
-                      <label className="block text-[11.5px] font-medium text-gray-500 mb-1">School / Institution name</label>
-                      <input
-                        type="text"
-                        placeholder="e.g. Army Public School Shillong"
-                        value={format.schoolName}
-                        onChange={(e) => setFormat((f) => ({ ...f, schoolName: e.target.value }))}
-                        className={fieldInputClass}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11.5px] font-medium text-gray-500 mb-1">Examination title</label>
-                      <input
-                        type="text"
-                        placeholder="e.g. Annual Examination"
-                        value={format.examTitle}
-                        onChange={(e) => setFormat((f) => ({ ...f, examTitle: e.target.value }))}
-                        className={fieldInputClass}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11.5px] font-medium text-gray-500 mb-1">Academic session</label>
-                      <input
-                        type="text"
-                        placeholder="e.g. 2024-25"
-                        value={format.session}
-                        onChange={(e) => setFormat((f) => ({ ...f, session: e.target.value }))}
-                        className={fieldInputClass}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11.5px] font-medium text-gray-500 mb-1">Time allowed</label>
-                      <input
-                        type="text"
-                        placeholder="e.g. 2hrs 30mins"
-                        value={format.timeAllowed}
-                        onChange={(e) => setFormat((f) => ({ ...f, timeAllowed: e.target.value }))}
-                        className={fieldInputClass}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11.5px] font-medium text-gray-500 mb-1">Maximum marks</label>
-                      <input
-                        type="text"
-                        placeholder="Auto (sum of marks)"
-                        value={format.maximumMarks}
-                        onChange={(e) => setFormat((f) => ({ ...f, maximumMarks: e.target.value }))}
-                        className={fieldInputClass}
-                      />
-                    </div>
-                    <div className="col-span-2">
-                      <label className="block text-[11.5px] font-medium text-gray-500 mb-1">General instructions (one per line)</label>
-                      <textarea
-                        rows={3}
-                        value={(format.instructions || []).join('\n')}
-                        onChange={(e) => setFormat((f) => ({ ...f, instructions: e.target.value.split(/\n+/) }))}
-                        className={`${fieldInputClass} h-auto py-2 resize-y`}
-                      />
-                    </div>
-                  </div>
+              )}
+              <ConfirmScreen
+                blueprint={blueprint}
+                units={availableUnits}
+                difficulty={settings.difficulty}
+                onDifficultyChange={(d) => setSettings((s) => ({ ...s, difficulty: d }))}
+                onAddNotes={handleAddNotes}
+                onGenerate={handleGenerate}
+                busy={generating}
+                initialAssign={initialAssign}
+                source={mode === 'B' ? 'manual' : 'reference'}
+              />
+              {generating && (
+                <div className="mt-3 flex items-center justify-between p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs">
+                  <span className="text-blue-900 font-medium">
+                    {sseState?.currentMessage || `${Math.round(sseState?.progressPercent || 0)}% completed…`}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setIsDrawerOpen(true)}
+                    className="font-semibold text-blue-700 hover:text-blue-900 underline cursor-pointer"
+                  >
+                    View Progress Details
+                  </button>
                 </div>
+              )}
+            </div>
+          )}
 
-                <button
-                  type="button"
-                  onClick={handleAnalyze}
-                  disabled={busy}
-                  className="mt-4 w-full h-11 inline-flex items-center justify-center gap-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-sm font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-                >
-                  {analyzing ? (
-                    <>
-                      <span className="h-4 w-4 rounded-full border-2 border-white/60 border-t-white animate-spin" />
-                      Analyzing paper…
-                    </>
-                  ) : (
-                    <>
-                      <SparklesIcon size={17} />
-                      Analyze Reference Paper
-                    </>
-                  )}
-                </button>
-
-                {busy && (
-                  <p className="mt-3 text-xs text-gray-500 flex items-center gap-2">
-                    <span className="inline-block h-3 w-3 rounded-full border-2 border-blue-600 border-t-transparent animate-spin" />
-                    {progress} {elapsed > 0 && `• ${elapsed}s`}
-                  </p>
-                )}
-              </div>
-            </Card>
-            </>
-            )}
-          </div>
-
-          {/* ── Right column (hidden on the mode chooser — nothing to show
-              until a mode is picked) ─────────────────────────── */}
-          {phase !== 'choosing' && (
-          <div className="col-span-12 lg:col-span-7">
-            <Card className="min-h-[420px]">
-              <div className="flex items-center gap-2.5 px-5 pt-5">
-                  {showConfirm ? (
-                    <>
-                      <CheckCircleIcon className="text-blue-600" size={19} />
-                      <h2 className="text-[15px] font-semibold text-gray-900">3. Review Blueprint &amp; Assign Units</h2>
-                    </>
-                  ) : (
-                    <>
-                      <CheckCircleIcon className="text-green-600" size={19} />
-                      <h2 className="text-[15px] font-semibold text-gray-900">3. Generated Question Paper</h2>
-                    </>
-                  )}
-                </div>
-
-                <div className="p-5">
-                  {error && (
-                    <div className="flex items-start gap-2.5 bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm">
-                      <AlertIcon size={17} className="shrink-0 mt-0.5" />
-                      <span className="whitespace-pre-line">{error}</span>
-                    </div>
-                  )}
-
-                  {/* The card header above already names this step
-                      (showConfirm ? "Review Blueprint" : "Generated Question
-                      Paper"); the review screen replaces the body only. */}
-                  {showReview && (
-                    <ReviewPaper
-                      mode={mode}
-                      blueprint={blueprint}
-                      result={result}
-                      staled={staled}
-                      staledCount={staledCount}
-                      regenerateStaleSlot={regenerateStaleSlot}
-                      onDownload={downloadPdf}
-                      onPrint={printPaper}
-                      onOpen={openPdf}
-                      onBack={resetToModeChoice}
-                    />
-                  )}
-
-                  {showConfirm && (
-                    <div className="mt-4">
-                      <p className="mb-2 text-[12px] text-gray-500">
-                        Notes for this paper are filed under <span className="font-medium text-gray-700">Class {settings.class} · {subject || '(set a subject)'}</span>.
-                        Upload notes for the same class &amp; subject or they will not appear.
-                      </p>
-                      {notesMsg && (
-                        <p className="mb-2 rounded-md bg-emerald-50 border border-emerald-200 px-3 py-1.5 text-[12px] text-emerald-800">
-                          {notesMsg}
-                        </p>
-                      )}
-                      <ConfirmScreen
-                        blueprint={blueprint}
-                        units={availableUnits}
-                        difficulty={settings.difficulty}
-                        onDifficultyChange={(d) => setSettings((s) => ({ ...s, difficulty: d }))}
-                        onAddNotes={handleAddNotes}
-                        onGenerate={handleGenerate}
-                        busy={generating}
-                        initialAssign={initialAssign}
-                        source={mode === 'B' ? 'manual' : 'reference'}
-                      />
-                      {generating && slotProgress.length > 0 && (
-                        <p className="mt-3 text-xs text-gray-500">
-                          {slotProgress.filter((s) => s.state === 'accepted').length}/{slotProgress.length} question(s) accepted…
-                        </p>
-                      )}
-                    </div>
-                  )}
-
-                  {!showConfirm && hasPaper && (
-                  <>
-                    <div className="flex items-center gap-2 bg-[#d1fae5] text-[#065f46] rounded-lg px-4 py-3 text-sm font-medium">
-                      <CheckCircleIcon size={18} />
-                      Your question paper has been generated successfully!
-                    </div>
-                    {result.rejected && result.rejected.length > 0 && (
-                      <p className="mt-2 text-xs text-gray-500">
-                        Note: {result.rejected.length} question(s) could not pass validation and were omitted.
-                      </p>
-                    )}
-
-                    <div className="mt-4 flex justify-end gap-3">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setResult(null);
-                          setPhase('confirm');
-                        }}
-                        className="inline-flex items-center gap-2 border border-gray-300 text-gray-600 hover:bg-gray-50 rounded-lg px-4 py-2 text-sm font-medium transition-colors"
-                      >
-                        Back to Blueprint
-                      </button>
-                      <button
-                        type="button"
-                        onClick={openPdf}
-                        className="inline-flex items-center gap-2 border border-blue-700 text-blue-700 hover:bg-blue-50 rounded-lg px-4 py-2 text-sm font-medium transition-colors"
-                      >
-                        <EyeIcon size={16} />
-                        View Full PDF
-                      </button>
-                      <button
-                        type="button"
-                        onClick={downloadPdf}
-                        className="inline-flex items-center gap-2 bg-blue-700 hover:bg-blue-800 text-white rounded-lg px-4 py-2 text-sm font-medium transition-colors"
-                      >
-                        <DownloadIcon size={16} />
-                        Download PDF
-                      </button>
-                    </div>
-
-                    {/* ── PDF-style viewer ─────────────────── */}
-                    <div className="mt-4 rounded-xl overflow-hidden border border-gray-200">
-                      <div className="bg-gray-800 h-11 flex items-center justify-between px-3">
-                        <div className="flex items-center">
-                          <FileTextIcon className="text-gray-400" size={17} />
-                          <div className="h-4 w-px bg-gray-600 mx-2.5" />
-                          <ToolbarButton title="Previous page" disabled={pageIndex === 0} onClick={() => setPageIndex((i) => Math.max(0, i - 1))}>
-                            <ChevronUpIcon size={16} />
-                          </ToolbarButton>
-                          <ToolbarButton
-                            title="Next page"
-                            disabled={pageIndex >= pages.length - 1}
-                            onClick={() => setPageIndex((i) => Math.min(pages.length - 1, i + 1))}
-                          >
-                            <ChevronDownIcon size={16} />
-                          </ToolbarButton>
-                          <div className="h-4 w-px bg-gray-600 mx-2.5" />
-                          <span className="text-[13px] text-gray-300 tabular-nums">
-                            {pageIndex + 1} / {pages.length}
-                          </span>
-                        </div>
-
-                        <div className="flex items-center">
-                          <ToolbarButton title="Zoom out" disabled={zoomIndex <= 0} onClick={() => setZoom(ZOOM_LEVELS[Math.max(0, zoomIndex - 1)])}>
-                            <ZoomOutIcon size={15} />
-                          </ToolbarButton>
-                          <span className="text-[13px] text-gray-300 tabular-nums w-12 text-center">{zoom}%</span>
-                          <ToolbarButton
-                            title="Zoom in"
-                            disabled={zoomIndex >= ZOOM_LEVELS.length - 1}
-                            onClick={() => setZoom(ZOOM_LEVELS[Math.min(ZOOM_LEVELS.length - 1, zoomIndex + 1)])}
-                          >
-                            <ZoomInIcon size={15} />
-                          </ToolbarButton>
-                        </div>
-
-                        <div className="flex items-center">
-                          <ToolbarButton title="Download PDF" onClick={downloadPdf}>
-                            <DownloadIcon size={15} />
-                          </ToolbarButton>
-                          <ToolbarButton title="Print" onClick={printPaper}>
-                            <PrinterIcon size={15} />
-                          </ToolbarButton>
-                          <ToolbarButton title="More">
-                            <MoreIcon size={15} />
-                          </ToolbarButton>
-                        </div>
-                      </div>
-
-                      <div className="bg-gray-200 overflow-auto flex justify-center p-6" style={{ height: 520 }}>
-                        <div style={{ width: (640 * zoom) / 100, height: (pageH * zoom) / 100 }}>
-                          <div
-                            ref={pageRef}
-                            style={{
-                              width: 640,
-                              minHeight: 860,
-                              transform: `scale(${zoom / 100})`,
-                              transformOrigin: 'top left',
-                            }}
-                            className="bg-white shadow-lg"
-                          >
-                            <div style={{ padding: '46px 40px 40px 42px', ...paperCss }}>
-                              {pages[pageIndex]?.header && model && <PaperHeader model={model} />}
-                              {pages[pageIndex]?.items.map((item, idx) =>
-                                item.kind === 'section' ? (
-                                  <div key={`sec-${idx}`} style={paperStyles.sectionTitle}>
-                                    {item.label}
-                                  </div>
-                                ) : (
-                                  <PaperQuestion key={item.q.key || idx} q={item.q} optionStyle={format.mcqOptionLabelStyle || 'roman'} />
-                                )
-                              )}
-                              {pages.length > 1 && <div style={paperStyles.pageNum}>{pageIndex + 1}</div>}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </>
-                )}
-
-                  {!showConfirm && !hasPaper && !error && (
-                    <div className="mt-5 border-2 border-dashed border-gray-300 rounded-xl flex flex-col items-center justify-center py-16 px-6 text-center">
-                      <FileTextIcon className="text-gray-300" size={44} strokeWidth={1.5} />
-                      <p className="mt-3 text-sm text-gray-500">Your generated question paper will appear here.</p>
-                    </div>
-                  )}
-                </div>
-            </Card>
-          </div>
+          {/* ── Review Paper ── */}
+          {showReview && (
+            <ReviewPaper
+              mode={mode}
+              blueprint={blueprint}
+              result={result}
+              staled={staled}
+              staledCount={staledCount}
+              regenerateStaleSlot={regenerateStaleSlot}
+              onDownload={downloadPdf}
+              onPrint={printPaper}
+              onOpen={openPdf}
+              onBack={resetToModeChoice}
+            />
           )}
         </div>
-      </main>
-    </div>
+      )}
+
+      {view === 'papers' && (
+        answerKeyPaper ? (
+          <AnswerKeyScreen
+            record={answerKeyPaper}
+            format={format}
+            onBack={() => setAnswerKeyPaper(null)}
+            onSave={async (updatedQs) => {
+              try {
+                await libraryService.patch(answerKeyPaper.id, { questions: updatedQs });
+                setAnswerKeyPaper((p) => ({ ...p, questions: updatedQs, updatedAt: new Date().toISOString() }));
+              } catch (e) {
+                console.error('Failed to save answer key corrections', e);
+              }
+            }}
+            onDownload={handleDownloadAnswerKey}
+          />
+        ) : (
+          <MyPapers
+            onCreateNew={() => {
+              resetToModeChoice();
+              setView('generate');
+            }}
+            onOpen={handleOpenPaper}
+            onDownload={handleDownloadLibraryPaper}
+            onDownloadAnswerKey={handleDownloadAnswerKey}
+            onViewAnswerKey={(p) => setAnswerKeyPaper(p)}
+          />
+        )
+      )}
+
+      {view === 'kb' && <KnowledgeBase />}
+
+      {view === 'templates' && <SchoolTemplates />}
+
+      {view === 'settings' && <SettingsView />}
+
+      {/* ── Real-Time Generation Progress Drawer (Phase 2 — M6 & M7) ── */}
+      <GenerationProgressDrawer
+        isOpen={isDrawerOpen}
+        onClose={() => setIsDrawerOpen(false)}
+        sseState={sseState}
+        onCancel={cancel}
+        onViewPaper={() => {
+          setIsDrawerOpen(false);
+          setPhase('review');
+          setView('generate');
+        }}
+      />
+    </AppShell>
   );
 }

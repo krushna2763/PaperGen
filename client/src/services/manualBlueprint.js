@@ -29,6 +29,11 @@ export function emptyQuestion(section = null) {
     itemMarks: [1, 1, 1, 1],
     wholeMarks: 5,
     section,
+    selectedImage: null,
+    imageAssets: null,
+    answerType: 'SHORT_ANSWER',
+    imageTopic: '',
+    teacherHint: '',
   };
 }
 
@@ -57,6 +62,9 @@ export function paperTotal(questions) {
 export function rowIssues(q, countMin = 1) {
   const issues = [];
   if (!q.type) issues.push('Pick a question type.');
+  if (q.type === 'IMAGE_BASED' && !q.selectedImage && (!q.imageAssets || q.imageAssets.length === 0)) {
+    issues.push('Select an image from the available images.');
+  }
   if (!Number.isFinite(Number(q.itemCount)) || Math.round(Number(q.itemCount)) < countMin) {
     issues.push(`Needs at least ${countMin} item(s).`);
   }
@@ -93,6 +101,12 @@ export function buildFormPayload({ paper, sections = [], questions = [] }) {
         q.marksMode === 'whole'
           ? { mode: 'whole', total: Number(q.wholeMarks) || 0 }
           : { mode: 'perItem', values: resizeItemMarks(q.itemMarks, q.itemCount, q.uniformMarks) },
+      ...(q.selectedImage ? { selectedImage: q.selectedImage } : {}),
+      ...(Array.isArray(q.imageAssets) && q.imageAssets.length > 0 ? { imageAssets: q.imageAssets } : (q.selectedImage ? { imageAssets: [q.selectedImage] } : {})),
+      ...(q.answerType ? { answerType: q.answerType } : {}),
+      ...(q.imageTopic ? { imageTopic: q.imageTopic } : {}),
+      ...(q.teacherHint ? { teacherHint: q.teacherHint } : {}),
+      ...(q.unit ? { unit: q.unit } : {}),
     })),
   };
 }
@@ -140,4 +154,82 @@ export function rowsFromTemplate(tplBlueprint) {
       section: q.section ?? null,
     };
   });
+}
+
+/**
+ * PHASE 3 — Restore builder form rows from a LIVE blueprint (builder re-entry
+ * after generation). Unlike rowsFromTemplate (templates carry no topics), the
+ * live blueprint DOES carry topic anchors — they land in `referenceItems[0]`,
+ * the same field both the manual builder and the extractor write.
+ *
+ * Type resolution: the blueprint stores the CANONICAL pipeline type (e.g.
+ * FILL_IN_THE_BLANK), while the builder rows key on the REGISTRY id (e.g.
+ * FILL_BLANK). `typeIdFor` maps canonical → registry id using the same
+ * definitions the builder renders; unknown canonical types fall back to the
+ * canonical id itself (the server registry round-trips them).
+ *
+ * Per-item hints: the builder folds item hints into `instruction`
+ * ("Each item should cover — a) …; b) …") because the blueprint contract has
+ * no per-item hint field. Restoration parses that suffix back out — round-
+ * tripping the builder's OWN convention, not inventing a second schema.
+ *
+ * @param {Object} blueprint - the current (possibly edited) blueprint
+ * @param {Array<Object>} types - registry definitions (server list or FALLBACK_TYPES)
+ * @returns {Array<Object>} builder rows
+ */
+export function rowsFromBlueprint(blueprint, types = []) {
+  const questions = Array.isArray(blueprint?.questions) ? blueprint.questions : [];
+  return questions.map((q) => {
+    const items = Array.isArray(q.items) ? q.items : [];
+    const marksArePerItem = items.length > 0 && items.some((it) => it.marks != null);
+    const values = marksArePerItem ? items.map((it) => it.marks ?? 1) : [];
+    const uniform = values.length > 0 && new Set(values).size === 1 ? values[0] : 1;
+    const def = (types || []).find((t) => t.blueprintType === q.type);
+    const { instruction, itemHints } = splitHints(q.instruction);
+    return {
+      ...emptyQuestion(q.section ?? null),
+      type: def?.id || q.type || '',
+      instruction,
+      topic: (q.referenceItems && q.referenceItems[0]) || '',
+      difficulty: q.difficulty || 'Medium',
+      itemCount: q.itemCount ?? items.length ?? 1,
+      optionCount: q.optionCount ?? null,
+      marksMode: marksArePerItem ? 'perItem' : 'whole',
+      uniformMarks: uniform,
+      itemMarks: values,
+      wholeMarks: q.totalMarks ?? q.marks?.total ?? 1,
+      section: q.section ?? null,
+      itemHints,
+      selectedImage: q.imageAssets?.[0] || q.selectedImage || null,
+      imageAssets: q.imageAssets || null,
+      answerType: q.answerType || 'SHORT_ANSWER',
+      imageTopic: q.imageTopic || '',
+      teacherHint: q.teacherHint || '',
+    };
+  });
+}
+
+/**
+ * Inverse of QuestionBuilder.withHints: split a folded instruction back into
+ * the bare instruction + per-item hints. Exact prefix match on the joiner the
+ * builder writes; no match → the instruction is returned whole.
+ * @param {string} instruction
+ * @returns {{ instruction: string, itemHints: string[] }}
+ */
+export function splitHints(instruction) {
+  const raw = String(instruction ?? '');
+  const marker = 'Each item should cover — ';
+  const at = raw.indexOf(marker);
+  if (at === -1) return { instruction: raw, itemHints: [] };
+  const bare = raw.slice(0, at).trim();
+  const body = raw.slice(at + marker.length);
+  const hints = body
+    .split(/;\s*/)
+    .map((part) => {
+      const m = part.match(/^\s*([a-z])\)\s*/);
+      return m ? part.slice(m[0].length) : part.trim();
+    })
+    .map((h) => h.trim())
+    .filter(Boolean);
+  return { instruction: bare, itemHints: hints };
 }

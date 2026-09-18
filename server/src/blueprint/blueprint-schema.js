@@ -29,6 +29,14 @@ export const GENERATOR_TYPES = ['MCQ', 'SHORT_ANSWER', 'LONG_ANSWER', 'TRUE_FALS
  */
 export const BLUEPRINT_TYPES = [
   ...GENERATOR_TYPES,
+  // IMAGE_BASED — a first-class type for questions requiring visual interpretation of an associated image
+  'IMAGE_BASED',
+  // MIXED — a first-class type for a MAIN question whose sub-items are NOT all
+  // the same type (e.g. "Fill in the blanks AND choose the correct answer":
+  // two FILL_IN_THE_BLANK items beside two MCQ items). The parent type is
+  // MIXED; items[].type is authoritative for generation, validation, rendering
+  // and the answer key. Never inferred from the first/last item.
+  'MIXED',
   'VERY_SHORT_ANSWER',
   'ESSAY',
   'EXPLAIN',
@@ -56,6 +64,8 @@ export const BLUEPRINT_TYPES = [
 
 /** Loose aliases so extractor/normalizer can canonicalize messy labels. */
 const TYPE_ALIASES = {
+  IMAGE_BASED: ['IMAGE_BASED', 'PICTURE_BASED', 'IMAGE', 'PICTURE', 'VISUAL', 'DIAGRAM_BASED', 'FIGURE_BASED', 'IMAGE_QUESTION'],
+  MIXED: ['MIXED', 'MIXED_TYPE', 'HETEROGENEOUS', 'COMBINED', 'COMPOSITE'],
   MCQ: ['MCQ', 'MULTIPLE_CHOICE', 'MULTIPLE_CHOICE_QUESTION', 'CHOOSE_THE_CORRECT_OPTION', 'CHOOSE_THE_CORRECT'],
   TRUE_FALSE: ['TRUE_FALSE', 'TRUE_OR_FALSE', 'TRUE/FALSE', 'TRUE_FALSE_TYPE'],
   FILL_IN_THE_BLANK: ['FILL_IN_THE_BLANK', 'FILL_IN_THE_BLANKS', 'FILL_IN_THE_BLANKS_TYPE'],
@@ -119,6 +129,63 @@ export function normalizeBlueprintType(value) {
 }
 
 /**
+ * The canonical PARENT type for a main question, from its item types.
+ *
+ * THE canonical rule (shared by the extractor and the normalizer so the two
+ * can never disagree):
+ *   - no known item types            → null  (caller keeps its own guess)
+ *   - every known item type is equal → that type
+ *   - two or more distinct known types → 'MIXED'
+ *
+ * `null` / 'UNKNOWN' item types are ignored — a single unknown item does not
+ * make an otherwise-homogeneous slot MIXED, and an all-unknown slot returns
+ * null so the caller's stem-based classification still wins.
+ *
+ * @param {Array<string|null|undefined>} itemTypes
+ * @returns {string|null} a BLUEPRINT_TYPES value, 'MIXED', or null
+ */
+export function deriveQuestionType(itemTypes) {
+  const known = (Array.isArray(itemTypes) ? itemTypes : [])
+    .map((t) => normalizeBlueprintType(t))
+    .filter((t) => t && t !== 'UNKNOWN');
+  if (known.length === 0) return null;
+  const distinct = [...new Set(known)];
+  return distinct.length === 1 ? distinct[0] : 'MIXED';
+}
+
+/**
+ * The canonical ANSWER FORM tag for one item, from its type (+ recovered
+ * option count for MCQ). Deterministic; used by the extractor, the generator
+ * prompt and the answer validator so all three agree on what an item's answer
+ * looks like.
+ * @param {string} type - a BLUEPRINT_TYPES value
+ * @param {number|null} [optionCount]
+ * @returns {string}
+ */
+export function answerFormForType(type, optionCount = null) {
+  const t = normalizeBlueprintType(type);
+  switch (t) {
+    case 'MCQ':
+      return 'single-correct-option';
+    case 'FILL_IN_THE_BLANK':
+      return 'fill-in-blank';
+    case 'TRUE_FALSE':
+      return 'true-or-false';
+    case 'MATCH_THE_FOLLOWING':
+      return 'match-pairs';
+    case 'SHORT_ANSWER':
+    case 'VERY_SHORT_ANSWER':
+      return 'short-sentence';
+    case 'LONG_ANSWER':
+    case 'ESSAY':
+    case 'EXPLAIN':
+      return 'extended-answer';
+    default:
+      return Number(optionCount) >= 2 ? 'single-correct-option' : 'free-response';
+  }
+}
+
+/**
  * Basic shape sanity check for a blueprint (before trusting it in the pipeline).
  *
  * This is deliberately LENIENT: it only rejects blueprints that cannot drive
@@ -142,4 +209,12 @@ export function checkBlueprintShape(blueprint) {
   return { ok: reasons.length === 0, reasons };
 }
 
-export default { GENERATOR_TYPES, BLUEPRINT_TYPES, NUMBER_WORDS, normalizeBlueprintType, checkBlueprintShape };
+export default {
+  GENERATOR_TYPES,
+  BLUEPRINT_TYPES,
+  NUMBER_WORDS,
+  normalizeBlueprintType,
+  deriveQuestionType,
+  answerFormForType,
+  checkBlueprintShape,
+};

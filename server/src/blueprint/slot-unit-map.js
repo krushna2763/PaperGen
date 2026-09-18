@@ -73,6 +73,20 @@ export async function validateSlotUnitMap(slotUnitMap, blueprint, ctx = {}) {
       return;
     }
 
+    // Mode A locking: an IMAGE_BASED/MIXED slot's unit was determined
+    // deterministically from the reference paper at analyze time and travels
+    // on the blueprint itself (isLocked + detectedUnit). A teacher assigns
+    // units — never moves a locked slot to a different one, because that
+    // would break the image/topic relationship the reference paper
+    // established. Enforced here, not just by a disabled UI field.
+    if (q.isLocked && q.detectedUnit && hasUnit && String(entry.unit).trim() !== String(q.detectedUnit).trim()) {
+      errors.push({
+        slot: k,
+        message: `Slot "${k}" is locked to "${q.detectedUnit}" by the reference paper — it cannot be reassigned to "${entry.unit}".`,
+      });
+      return;
+    }
+
     if (hasItems) {
       if (q.itemsIndependent === false) {
         errors.push({

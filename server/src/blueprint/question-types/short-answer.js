@@ -8,6 +8,7 @@ export default {
   itemsIndependent: true,
   optionBearer: false,
   optionMode: 'none',
+  answerShape: 'text',
   marksMode: 'perItem',
   countKey: 'itemCount',
   countLabel: 'Items',

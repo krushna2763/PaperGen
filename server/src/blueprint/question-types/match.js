@@ -13,6 +13,7 @@ export default {
   itemsIndependent: true, // pairs are independent; a shared stimulus would make this false
   optionBearer: false,
   optionMode: 'none',
+  answerShape: 'pairs',
   marksMode: 'whole', // whole-question marks, like the reference path's MATCH slots
   countKey: 'itemCount',
   countLabel: 'Pairs',

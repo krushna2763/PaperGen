@@ -3,8 +3,9 @@ import { env } from '../config/env.js';
 
 /**
  * Embeddings Module (RAG Layer)
- * Converts structured question objects into semantic embedding vectors using Gemini.
- * 
+ * Converts structured question objects into semantic embedding vectors via the
+ * configured embedding provider (EMBEDDING_PROVIDER: openrouter | gemini).
+ *
  * Philosophy: ONE QUESTION = ONE CHUNK = ONE EMBEDDING VECTOR = ONE FUTURE QDRANT POINT
  */
 export const embeddingService = {
@@ -45,11 +46,12 @@ export const embeddingService = {
 
   /**
    * Batch embed an array of structured question objects with TRUE multi-input
-   * batching (ONE batchEmbedContents API call), preserving all metadata.
+   * batching (ONE provider API call), preserving all metadata.
    * Each input is served from the in-memory embedding cache when available.
    *
    * @param {Array<Object>} questions - Array of question objects
-   * @param {Object} [options={}] - { chunkSize } (embedding API allows ~100/call)
+   * @param {Object} [options={}] - { chunkSize } (Gemini legacy path ~100/call;
+   *   ignored on the OpenRouter path, which takes the whole list in one call)
    * @returns {Promise<{ questions: Array<Object>, count: number, vectorDimension: number, embeddingModel: string }>}
    */
   async embedQuestions(questions, options = {}) {

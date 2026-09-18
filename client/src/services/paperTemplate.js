@@ -188,6 +188,14 @@ export function templateToFormat(template, current = {}) {
   // ("ANNUAL EXAMINATION (2022-23)"). When it does, keep the line VERBATIM
   // and leave the session field empty so it is never duplicated; when the
   // session is separate, keep both fields (the format composes title + session).
+  // PER-PAPER HEADER FIELDS — reset, never inherit.
+  // `templateToFormat` runs on every Mode A analyze against a device-global
+  // format (localStorage). examTitle / session / timeAllowed / maximumMarks
+  // describe THIS reference paper; if the new reference does not carry one,
+  // fall back to the neutral default rather than leaving the PREVIOUS
+  // reference's value in place (that is how a Unit 3 / 60-mark / "Term
+  // Examination-1" header leaked onto a Unit 4 paper). schoolName and the
+  // instructions block are school identity and stay sticky.
   const rawTitle = String(t.examTitle || '').trim();
   const sess = String(t.session || '').trim();
   if (rawTitle) {
@@ -196,12 +204,15 @@ export function templateToFormat(template, current = {}) {
       out.session = '';
     } else {
       out.examTitle = rawTitle;
-      if (sess) out.session = sess;
+      out.session = sess || '';
     }
+  } else {
+    out.examTitle = DEFAULT_PAPER_FORMAT.examTitle;
+    out.session = DEFAULT_PAPER_FORMAT.session;
   }
 
-  if (t.duration) out.timeAllowed = normalizeDuration(t.duration);
-  if (Number.isFinite(t.maximumMarks)) out.maximumMarks = String(t.maximumMarks);
+  out.timeAllowed = t.duration ? normalizeDuration(t.duration) : DEFAULT_PAPER_FORMAT.timeAllowed;
+  out.maximumMarks = Number.isFinite(t.maximumMarks) ? String(t.maximumMarks) : DEFAULT_PAPER_FORMAT.maximumMarks;
 
   const items = template?.instructions?.items;
   if (Array.isArray(items) && items.length > 0) out.instructions = items;

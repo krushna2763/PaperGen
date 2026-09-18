@@ -12,7 +12,8 @@ export default {
   blueprintType: 'MCQ', // canonical pipeline type (BLUEPRINT_TYPES / aliases)
   itemsIndependent: true,
   optionBearer: true,
-  optionMode: 'required', // optionCount >= 2 enforced
+  optionMode: 'required',
+  answerShape: 'option', // answer = the correct option's exact text
   marksMode: 'perItem',
   countKey: 'itemCount',
   countLabel: 'Items',

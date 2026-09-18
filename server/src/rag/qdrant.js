@@ -44,6 +44,96 @@ function getCollectionName() {
   return name.trim();
 }
 
+// ─── Scope-key canonicalization (write AND read) ─────────────────────────────
+/**
+ * Canonical form of a class/subject scope value: trimmed, internal whitespace
+ * collapsed, lowercased. EVERY scope match — payload writes and Qdrant filters
+ * alike — goes through this, so "English", "ENGLISH" and " english " all file
+ * into (and resolve from) ONE corpus instead of silently splitting in two.
+ *
+ * Class/subject only. Unit ids keep their exact form: they flow from the
+ * units list this store itself served (the teacher assigns from that dropdown),
+ * so they round-trip byte-identical by construction.
+ *
+ * @param {string|null} value
+ * @returns {string|null} canonical key, or null when absent/blank
+ */
+export function canonicalScopeKey(value) {
+  const s = String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+  return s === '' ? null : s;
+}
+
+/**
+ * Group syllabus corpus points into NOTE DOCUMENTS (read-time grouping over
+ * the ONE stored syllabus corpus — no separate document store exists or is
+ * created). Points are keyed by sourceHash (the content hash every syllabus
+ * point carries), so a document = one ingested notes file = one filing under
+ * (class, subject).
+ *
+ * Pure: takes [{ payload }], returns [{ id, title, class, subject, units,
+ * chunkCount, ingestedAt, filename }]. Units are listed in first-seen order
+ * with per-unit chunk counts; the newest point's ingestedAt wins (re-ingest
+ * refreshes the timestamp). Chunks missing a sourceHash (legacy points) are
+ * skipped — they cannot be attributed to a document.
+ *
+ * Exported for tests.
+ *
+ * @param {Array<{ payload?: Object }>} points
+ * @param {Object} [scope] - { class, subject } — when given, only points in
+ *   that scope are grouped (server filters already did this; defense in depth)
+ * @returns {Array<Object>} documents sorted by ingestedAt desc, title asc
+ */
+export function groupSyllabusDocuments(points, scope = {}) {
+  const byHash = new Map();
+  for (const p of Array.isArray(points) ? points : []) {
+    const payload = p?.payload || {};
+    const hash = payload.sourceHash;
+    if (!hash || typeof hash !== 'string') continue;
+    if (scope.class && canonicalScopeKey(payload.class) !== canonicalScopeKey(scope.class)) continue;
+    if (scope.subject && canonicalScopeKey(payload.subject) !== canonicalScopeKey(scope.subject)) continue;
+
+    let doc = byHash.get(hash);
+    if (!doc) {
+      doc = {
+        id: hash,
+        title: payload.sourceFilename || null,
+        class: payload.class ?? null,
+        subject: payload.subject ?? null,
+        units: [], // [{ id, label, chunkCount }]
+        chunkCount: 0,
+        ingestedAt: payload.ingestedAt || null,
+        filename: payload.sourceFilename || null,
+      };
+      byHash.set(hash, doc);
+    }
+    // Newest wins: re-ingest refreshes the timestamp on every point.
+    if (payload.ingestedAt && (!doc.ingestedAt || payload.ingestedAt > doc.ingestedAt)) {
+      doc.ingestedAt = payload.ingestedAt;
+    }
+    if (!doc.title && payload.sourceFilename) doc.title = payload.sourceFilename;
+    doc.chunkCount += 1;
+
+    const unit = payload.unit;
+    if (unit != null && String(unit).trim() !== '') {
+      const key = String(unit);
+      const existing = doc.units.find((u) => u.id === key);
+      if (existing) existing.chunkCount += 1;
+      else doc.units.push({ id: key, label: key, chunkCount: 1 });
+    }
+  }
+  return [...byHash.values()].sort(
+    (a, b) => String(b.ingestedAt || '').localeCompare(String(a.ingestedAt || '')) || String(a.title || '').localeCompare(String(b.title || ''))
+  );
+}
+
+/** Push canonical class/subject match filters onto a `must` array. */
+function pushScopeFilters(must, { class: cls, subject } = {}) {
+  const c = canonicalScopeKey(cls);
+  if (c) must.push({ key: 'class', match: { value: c } });
+  const s = canonicalScopeKey(subject);
+  if (s) must.push({ key: 'subject', match: { value: s } });
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 export const qdrantStore = {
 
@@ -81,7 +171,8 @@ export const qdrantStore = {
    * Ensure the target collection exists with correct vector dimension and cosine distance.
    * If it does not exist, create it.  If it exists, verify dimension match.
    * 
-   * @param {number} vectorDimension - Expected vector size (e.g. 3072)
+   * @param {number} vectorDimension - Expected vector size (2048-d for the
+   *   OpenRouter nemotron embed model, 3072-d for legacy gemini-embedding-001)
    * @returns {Promise<{ created: boolean, collection: string, vectorDimension: number }>}
    */
   async ensureCollection(vectorDimension) {
@@ -154,8 +245,10 @@ export const qdrantStore = {
 
     const sourceDocumentId = opts.sourceDocumentId || `paper_${randomUUID().slice(0, 12)}`;
     const sourceHash = opts.sourceHash || null; // content hash → skip re-ingestion
-    const docClass = opts.class || null;
-    const docSubject = opts.subject || null;
+    // Scope values are canonicalized on WRITE so every later read filter —
+    // which canonicalizes too — matches regardless of how the teacher typed it.
+    const docClass = canonicalScopeKey(opts.class);
+    const docSubject = canonicalScopeKey(opts.subject);
 
     // ─── Validate every question before touching Qdrant ──────────────────────
     let detectedDimension = null;
@@ -316,8 +409,10 @@ export const qdrantStore = {
     if (!Array.isArray(chunks) || chunks.length === 0) {
       throw new Error('[Qdrant] No syllabus chunks provided for indexing.');
     }
-    const cls = opts.class != null ? String(opts.class) : null;
-    const subject = opts.subject != null ? String(opts.subject) : null;
+    // Scope values are canonicalized on WRITE (see canonicalScopeKey) so the
+    // teacher's casing/spacing can never split one corpus into two.
+    const cls = canonicalScopeKey(opts.class);
+    const subject = canonicalScopeKey(opts.subject);
     const unit = opts.unit != null ? String(opts.unit) : null;
     const sourceHash = opts.sourceHash || null;
     if (!unit) throw new Error('[Qdrant] Syllabus chunks require an explicit unit tag.');
@@ -331,7 +426,13 @@ export const qdrantStore = {
       if (dim === null) dim = c.embedding.length;
       else if (c.embedding.length !== dim) continue;
       points.push({
-        id: stablePointId(`${sourceHash}:${c.chunkIndex}`),
+        // POINT ID IS SCOPE-AWARE: the same notes PDF filed under a different
+        // class/subject is a DIFFERENT filing and must not clobber the first
+        // one's payload (deterministic IDs previously collided on
+        // sourceHash:chunkIndex alone, silently overwriting the earlier
+        // scope's class/subject/unit). Same-scope re-ingest still produces the
+        // same IDs → idempotent replace.
+        id: stablePointId(`${cls}::${subject}::${unit}::${sourceHash}:${c.chunkIndex}`),
         vector: c.embedding,
         payload: {
           corpus: 'syllabus',
@@ -339,6 +440,8 @@ export const qdrantStore = {
           subject,
           unit,
           sourceHash,
+          sourceFilename: opts.sourceFilename || null,
+          ingestedAt: opts.ingestedAt || new Date().toISOString(),
           chunkIndex: c.chunkIndex,
           // TOPIC ANCHORING (Mode B): the detected heading of this chunk, so
           // GET /kb/topics can group a unit's chunks into teacher-facing
@@ -377,8 +480,7 @@ export const qdrantStore = {
         { key: 'corpus', match: { value: 'syllabus' } },
         { key: 'sourceHash', match: { value: sourceHash } },
       ];
-      if (scope.class != null && String(scope.class).trim() !== '') must.push({ key: 'class', match: { value: String(scope.class) } });
-      if (scope.subject != null && String(scope.subject).trim() !== '') must.push({ key: 'subject', match: { value: String(scope.subject) } });
+      pushScopeFilters(must, scope);
       if (scope.unit != null && String(scope.unit).trim() !== '') must.push({ key: 'unit', match: { value: String(scope.unit) } });
 
       const hits = await client.scroll(name, { limit: 256, with_payload: true, with_vector: false, filter: { must } });
@@ -391,6 +493,37 @@ export const qdrantStore = {
     }
   },
 
+  /**
+   * NOTE DOCUMENTS for a class+subject: the syllabus corpus grouped by
+   * sourceHash (one entry = one ingested notes file). Pure read over the ONE
+   * existing syllabus corpus — no second Knowledge Base, no duplicated storage.
+   *
+   * @param {Object} ctx - { class, subject }
+   * @returns {Promise<Array<{ id, title, class, subject, units, chunkCount, ingestedAt, filename }>>}
+   */
+  async listSyllabusDocuments({ class: cls, subject } = {}) {
+    try {
+      const client = getClient();
+      const name = getCollectionName();
+      await ensurePayloadIndex(client, name, 'corpus');
+      const must = [{ key: 'corpus', match: { value: 'syllabus' } }];
+      pushScopeFilters(must, { class: cls, subject });
+
+      const points = [];
+      let offset;
+      do {
+        const page = await client.scroll(name, { limit: 256, offset, with_payload: true, with_vector: false, filter: { must } });
+        points.push(...(page?.points ?? []));
+        offset = page?.next_page_offset ?? undefined;
+      } while (offset);
+
+      return groupSyllabusDocuments(points);
+    } catch (err) {
+      console.error(`[Qdrant] listSyllabusDocuments failed: ${err.message}`);
+      return [];
+    }
+  },
+
   /** Distinct syllabus units WITH notes for a class+subject, with chunk counts. */
   async listUnitsWithNotes({ class: cls, subject } = {}) {
     try {
@@ -398,8 +531,7 @@ export const qdrantStore = {
       const name = getCollectionName();
       await ensurePayloadIndex(client, name, 'corpus');
       const must = [{ key: 'corpus', match: { value: 'syllabus' } }];
-      if (cls != null && String(cls).trim() !== '') must.push({ key: 'class', match: { value: String(cls) } });
-      if (subject != null && String(subject).trim() !== '') must.push({ key: 'subject', match: { value: String(subject) } });
+      pushScopeFilters(must, { class: cls, subject });
 
       const counts = new Map();
       let offset;
@@ -443,8 +575,7 @@ export const qdrantStore = {
         { key: 'corpus', match: { value: 'syllabus' } },
         { key: 'unit', match: { value: String(unit) } },
       ];
-      if (cls != null && String(cls).trim() !== '') must.push({ key: 'class', match: { value: String(cls) } });
-      if (subject != null && String(subject).trim() !== '') must.push({ key: 'subject', match: { value: String(subject) } });
+      pushScopeFilters(must, { class: cls, subject });
 
       const counts = new Map();
       let offset;
@@ -481,14 +612,118 @@ export const qdrantStore = {
         { key: 'corpus', match: { value: 'syllabus' } },
         { key: 'unit', match: { value: String(unit) } },
       ];
-      if (cls != null && String(cls).trim() !== '') must.push({ key: 'class', match: { value: String(cls) } });
-      if (subject != null && String(subject).trim() !== '') must.push({ key: 'subject', match: { value: String(subject) } });
+      pushScopeFilters(must, { class: cls, subject });
       const page = await client.scroll(name, { limit: 1, with_payload: false, with_vector: false, filter: { must } });
       return (page?.points ?? []).length > 0;
     } catch (err) {
       console.error(`[Qdrant] unitHasNotes failed: ${err.message}`);
       return false;
     }
+  },
+
+  /**
+   * Scroll ALL syllabus payloads for one scope (class/subject[/unit]).
+   * Feeds the BM25 index — payloads only, never vectors (cheap).
+   * @param {Object} scope - { class, subject, unit? }
+   * @returns {Promise<Array<{ payload: Object }>>}
+   */
+  async scrollSyllabusPayloads({ class: cls, subject, unit } = {}) {
+    try {
+      const client = getClient();
+      const name = getCollectionName();
+      const must = [{ key: 'corpus', match: { value: 'syllabus' } }];
+      pushScopeFilters(must, { class: cls, subject });
+      if (unit != null && String(unit).trim() !== '') {
+        must.push({ key: 'unit', match: { value: String(unit) } });
+      }
+      const rows = [];
+      let offset;
+      do {
+        const page = await client.scroll(name, { limit: 256, offset, with_payload: true, with_vector: false, filter: { must } });
+        for (const p of page?.points ?? []) rows.push({ payload: p.payload || {} });
+        offset = page?.next_page_offset ?? undefined;
+      } while (offset);
+      return rows;
+    } catch (err) {
+      console.error(`[Qdrant] scrollSyllabusPayloads failed: ${err.message}`);
+      return [];
+    }
+  },
+
+  /**
+   * Upsert PARENT/CHILD syllabus chunks (Docling/semantic-chunker pipeline).
+   *
+   * Same scope-safety contract as upsertSyllabusChunks: the point ID embeds
+   * class::subject::unit::sourceHash::chunkId, so re-ingesting the same file
+   * in the same scope is idempotent while ANY scope difference creates a
+   * separate filing — a Class 4 English Unit 4 upload can never overwrite
+   * another class/subject/unit's points (PART 29).
+   *
+   * Both parents and children are stored; children are the retrieval units,
+   * parents exist for context restore. `chunkIndex` stays globally unique per
+   * document so legacy consumers (chunkIndex-based code) keep working.
+   *
+   * @param {Array<Object>} chunks - chunk objects from chunking/semantic-chunker.js
+   *   (each: text, embedding, chunkType, chunkId, parentChunkId, hash, …)
+   * @param {Object} opts - { class, subject, unit, sourceHash, sourceType? }
+   */
+  async upsertSyllabusChunksV2(chunks, opts = {}) {
+    if (!Array.isArray(chunks) || chunks.length === 0) {
+      throw new Error('[Qdrant] No syllabus chunks provided for indexing.');
+    }
+    const cls = canonicalScopeKey(opts.class);
+    const subject = canonicalScopeKey(opts.subject);
+    const unit = opts.unit != null ? String(opts.unit) : null;
+    const sourceHash = opts.sourceHash || null;
+    const sourceType = opts.sourceType || 'syllabus_notes';
+    if (!unit) throw new Error('[Qdrant] Syllabus chunks require an explicit unit tag.');
+    if (!sourceHash) throw new Error('[Qdrant] Syllabus chunks require a sourceHash.');
+
+    let dim = null;
+    const points = [];
+    for (const c of chunks) {
+      if (!c || !c.text || !Array.isArray(c.embedding) || c.embedding.length === 0) continue;
+      if (!c.embedding.every((v) => typeof v === 'number' && isFinite(v))) continue;
+      if (dim === null) dim = c.embedding.length;
+      else if (c.embedding.length !== dim) continue;
+      points.push({
+        // SCOPE-SAFE STABLE ID (PART 29): scope + doc hash + content chunkId.
+        id: stablePointId(`${cls}::${subject}::${unit}::${sourceHash}:${c.chunkId || c.chunkIndex}`),
+        vector: c.embedding,
+        payload: {
+          corpus: 'syllabus',
+          sourceType,
+          class: cls,
+          subject,
+          unit,
+          sourceHash,
+          sourceFilename: opts.sourceFilename || null,
+          ingestedAt: opts.ingestedAt || new Date().toISOString(),
+          chunkId: c.chunkId || null,
+          parentChunkId: c.parentChunkId || null,
+          chunkType: c.chunkType || 'child',
+          section: c.section ?? null,
+          headingPath: c.headingPath ?? [],
+          topic: c.topic ?? null,
+          sourcePage: c.sourcePage ?? null,
+          tokenCount: c.tokenCount ?? null,
+          hash: c.hash ?? null,
+          chunkIndex: c.chunkIndex ?? 0,
+          // Back-compat: /kb/topics groups on `chapter`.
+          chapter: c.topic ?? detectChunkHeading(c.text),
+          text: c.text,
+        },
+      });
+    }
+    if (points.length === 0) throw new Error('[Qdrant] All syllabus chunks were invalid — nothing to index.');
+
+    await this.ensureCollection(dim);
+    const client = getClient();
+    const name = getCollectionName();
+    await client.upsert(name, { wait: true, points });
+    const parents = points.filter((p) => p.payload.chunkType === 'parent').length;
+    console.log(`[Qdrant] Indexed ${points.length} chunk(s) (${parents} parent / ${points.length - parents} child) for unit "${unit}" (${dim}-d).`);
+    return { indexedCount: points.length, parentCount: parents, childCount: points.length - parents, vectorDimension: dim, unit, sourceHash };
   },
 
   /**
@@ -505,14 +740,11 @@ export const qdrantStore = {
     const client = getClient();
     const collectionName = getCollectionName();
 
-    // Build metadata filter from available values (never invent class/subject)
+    // Build metadata filter from available values (never invent class/subject).
+    // Scope values are canonicalized so a query for "Englis"/"ENGLISH" hits the
+    // same points regardless of the caller's casing.
     const must = [];
-    if (filter.class !== undefined && filter.class !== null && String(filter.class).trim() !== '') {
-      must.push({ key: 'class', match: { value: String(filter.class) } });
-    }
-    if (filter.subject !== undefined && filter.subject !== null && String(filter.subject).trim() !== '') {
-      must.push({ key: 'subject', match: { value: String(filter.subject) } });
-    }
+    pushScopeFilters(must, filter);
     // TWO CORPORA: content retrieval passes corpus:'syllabus' (+ unit), source
     // dedup passes corpus:'past_paper'. `sourceType` is retired as a filter key
     // (kept in the payload for back-compat) — the two pools now differ by design.
@@ -599,6 +831,53 @@ async function ensurePayloadIndex(client, collectionName, field) {
   } catch {
     // already indexed — fine
   }
+}
+
+/**
+ * ONE-TIME (idempotent) repair pass: canonicalize the class/subject payload
+ * values of points written BEFORE scope canonicalization existed. Reads filter
+ * on the canonical key, so without this a corpus filed as "Englis" would go
+ * invisible to canonical queries for "englis". Payload-only rewrite; points
+ * already canonical are left untouched, so re-running is a no-op. Safe to call
+ * at every boot — it returns quickly once the store is canonical.
+ *
+ * @returns {Promise<{ scanned: number, rewritten: number }>}
+ */
+export async function canonicalizeStoredScopes() {
+  const client = getClient();
+  const name = getCollectionName();
+  await ensurePayloadIndex(client, name, 'class');
+  await ensurePayloadIndex(client, name, 'subject');
+
+  let scanned = 0;
+  let rewritten = 0;
+  let offset;
+  do {
+    const page = await client.scroll(name, { limit: 256, offset, with_payload: true, with_vector: false });
+    const points = page?.points ?? [];
+    // Group rewrites by their target (class, subject) pair → one setPayload per group.
+    const groups = new Map();
+    for (const p of points) {
+      scanned += 1;
+      const payload = p.payload || {};
+      const c = canonicalScopeKey(payload.class);
+      const s = canonicalScopeKey(payload.subject);
+      if (payload.class === c && payload.subject === s) continue; // already canonical
+      const key = `${c ?? ''}\u0000${s ?? ''}`;
+      if (!groups.has(key)) groups.set(key, { payload: { class: c, subject: s }, ids: [] });
+      groups.get(key).ids.push(p.id);
+    }
+    for (const { payload, ids } of groups.values()) {
+      await client.setPayload(name, { payload, points: ids });
+      rewritten += ids.length;
+    }
+    offset = page?.next_page_offset ?? undefined;
+  } while (offset);
+
+  if (rewritten > 0) {
+    console.log(`[Qdrant] Scope canonicalization: rewrote class/subject on ${rewritten} of ${scanned} point(s).`);
+  }
+  return { scanned, rewritten };
 }
 
 /**
